@@ -68,6 +68,67 @@ final class RunnerProjectTests: XCTestCase {
         )
     }
 
+    func testRunnerMatchingPrefersKnownPathOverCollidingRunnerID() {
+        let firstProject = RunnerProject(path: "/tmp/first", runnerID: "shared-runner")
+        let secondProject = RunnerProject(path: "/tmp/second", runnerID: "second-runner")
+        let runner = RunningRunner(
+            processIdentifier: 1746,
+            runnerID: "shared-runner",
+            path: "/tmp/second",
+            command: "amp --no-tui --runner-id shared-runner"
+        )
+        let projects = [firstProject, secondProject]
+
+        XCTAssertEqual(
+            RunnerMatcher.project(for: runner, among: projects, and: [runner]),
+            secondProject
+        )
+        XCTAssertEqual(
+            RunnerMatcher.runner(for: firstProject, among: projects, and: [runner]),
+            .conflict
+        )
+    }
+
+    func testRunnerIDOnlyMatchingRequiresOneRunnerAndOneProject() {
+        let project = RunnerProject(path: "/tmp/example", runnerID: "shared-runner")
+        let firstRunner = RunningRunner(
+            processIdentifier: 1746,
+            runnerID: "shared-runner",
+            path: nil,
+            command: "amp --no-tui --runner-id shared-runner"
+        )
+        let secondRunner = RunningRunner(
+            processIdentifier: 1747,
+            runnerID: "shared-runner",
+            path: nil,
+            command: "amp --no-tui --runner-id shared-runner"
+        )
+
+        XCTAssertEqual(
+            RunnerMatcher.runner(for: project, among: [project], and: [firstRunner]),
+            .matched(firstRunner)
+        )
+        XCTAssertEqual(
+            RunnerMatcher.project(for: firstRunner, among: [project], and: [firstRunner]),
+            project
+        )
+        XCTAssertEqual(
+            RunnerMatcher.runner(
+                for: project,
+                among: [project],
+                and: [firstRunner, secondRunner]
+            ),
+            .conflict
+        )
+        XCTAssertNil(
+            RunnerMatcher.project(
+                for: firstRunner,
+                among: [project],
+                and: [firstRunner, secondRunner]
+            )
+        )
+    }
+
     func testTerminalFormatterConsumesANSIColorSequences() {
         let formatted = TerminalTextFormatter.attributedString(
             for: "plain \u{001B}[31mred\u{001B}[0m text"

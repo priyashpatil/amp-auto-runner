@@ -19,21 +19,36 @@ final class ProjectStore: ObservableObject {
             return
         }
 
-        self.projects = projects
+        self.projects = Self.projectsWithUniqueRunnerIDs(projects)
+        if self.projects != projects {
+            save()
+        }
     }
 
     @discardableResult
     func add(directoryURL: URL, runnerID: String? = nil) -> RunnerProject {
-        let candidate = RunnerProject(path: directoryURL.path, runnerID: runnerID)
+        var candidate = RunnerProject(path: directoryURL.path, runnerID: runnerID)
 
         if let index = projects.firstIndex(where: { $0.path == candidate.path }) {
             if let runnerID, projects[index].runnerID != runnerID {
-                projects[index].runnerID = runnerID
+                let usedRunnerIDs = Set(
+                    projects.enumerated().compactMap { projectIndex, project in
+                        projectIndex == index ? nil : project.runnerID
+                    }
+                )
+                projects[index].runnerID = Self.uniqueRunnerID(
+                    runnerID,
+                    excluding: usedRunnerIDs
+                )
                 save()
             }
             return projects[index]
         }
 
+        candidate.runnerID = Self.uniqueRunnerID(
+            candidate.runnerID,
+            excluding: Set(projects.map(\.runnerID))
+        )
         projects.append(candidate)
         projects.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         save()
@@ -78,5 +93,42 @@ final class ProjectStore: ObservableObject {
         }
 
         defaults.set(data, forKey: Self.storageKey)
+    }
+
+    private static func projectsWithUniqueRunnerIDs(
+        _ projects: [RunnerProject]
+    ) -> [RunnerProject] {
+        var usedRunnerIDs: Set<String> = []
+
+        return projects.map { project in
+            var project = project
+            project.runnerID = uniqueRunnerID(project.runnerID, excluding: usedRunnerIDs)
+            usedRunnerIDs.insert(project.runnerID)
+            return project
+        }
+    }
+
+    private static func uniqueRunnerID(
+        _ preferredRunnerID: String,
+        excluding usedRunnerIDs: Set<String>
+    ) -> String {
+        guard usedRunnerIDs.contains(preferredRunnerID) else {
+            return preferredRunnerID
+        }
+
+        let baseRunnerID = RunnerProject.normalizedRunnerID(preferredRunnerID) ?? "amp-runner"
+        var suffixNumber = 2
+
+        while true {
+            let suffix = "-\(suffixNumber)"
+            let maximumBaseLength = 63 - suffix.count
+            let shortenedBase = baseRunnerID.prefix(maximumBaseLength)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+            let candidate = "\(shortenedBase)\(suffix)"
+            if !usedRunnerIDs.contains(candidate) {
+                return candidate
+            }
+            suffixNumber += 1
+        }
     }
 }

@@ -34,6 +34,80 @@ enum RunnerState: Equatable {
     case failed(String)
 }
 
+enum RunnerMatch: Equatable {
+    case none
+    case matched(RunningRunner)
+    case conflict
+}
+
+enum RunnerMatcher {
+    static func runner(
+        for project: RunnerProject,
+        among projects: [RunnerProject],
+        and runners: [RunningRunner]
+    ) -> RunnerMatch {
+        let pathMatches = runners.filter { $0.path == project.path }
+        if pathMatches.count == 1, let runner = pathMatches.first {
+            return .matched(runner)
+        }
+        if pathMatches.count > 1 {
+            let runnerIDMatches = pathMatches.filter { $0.runnerID == project.runnerID }
+            if runnerIDMatches.count == 1, let runner = runnerIDMatches.first {
+                return .matched(runner)
+            }
+            return .conflict
+        }
+
+        guard projects.filter({ $0.runnerID == project.runnerID }).count == 1 else {
+            return .conflict
+        }
+
+        let runnerIDMatches = runners.filter { $0.runnerID == project.runnerID }
+        guard !runnerIDMatches.isEmpty else {
+            return .none
+        }
+        guard
+            runnerIDMatches.count == 1,
+            runnerIDMatches.first?.path == nil,
+            let runner = runnerIDMatches.first
+        else {
+            return .conflict
+        }
+        return .matched(runner)
+    }
+
+    static func project(
+        for runner: RunningRunner,
+        among projects: [RunnerProject],
+        and runners: [RunningRunner]
+    ) -> RunnerProject? {
+        if let path = runner.path {
+            let pathMatches = projects.filter { $0.path == path }
+            if pathMatches.count == 1 {
+                return pathMatches.first
+            }
+            if pathMatches.count > 1 {
+                let runnerIDMatches = pathMatches.filter { $0.runnerID == runner.runnerID }
+                return runnerIDMatches.count == 1 ? runnerIDMatches.first : nil
+            }
+            return nil
+        }
+
+        let projectMatches = projects.filter { $0.runnerID == runner.runnerID }
+        let runnerMatches = runners.filter {
+            $0.path == nil && $0.runnerID == runner.runnerID
+        }
+        guard
+            projectMatches.count == 1,
+            runnerMatches.count == 1,
+            runnerMatches.first?.processIdentifier == runner.processIdentifier
+        else {
+            return nil
+        }
+        return projectMatches.first
+    }
+}
+
 private struct RunnerTerminal {
     let master: FileHandle
     let slave: FileHandle
@@ -252,8 +326,14 @@ final class RunnerManager: ObservableObject {
     }
 
     func runningRunner(for project: RunnerProject) -> RunningRunner? {
-        runningRunners.first { $0.path == project.path }
-            ?? runningRunners.first { $0.runnerID == project.runnerID }
+        guard case let .matched(runner) = RunnerMatcher.runner(
+            for: project,
+            among: [project],
+            and: runningRunners
+        ) else {
+            return nil
+        }
+        return runner
     }
 
     func isOwned(_ runner: RunningRunner) -> Bool {
@@ -265,9 +345,17 @@ final class RunnerManager: ObservableObject {
             return
         }
 
-        if runningRunner(for: project) != nil {
+        switch RunnerMatcher.runner(for: project, among: [project], and: runningRunners) {
+        case .matched:
             states[project.id] = .stopped
             return
+        case .conflict:
+            states[project.id] = .failed(
+                "Runner identity conflicts with another running Amp process."
+            )
+            return
+        case .none:
+            break
         }
 
         if
@@ -394,19 +482,6 @@ final class RunnerManager: ObservableObject {
             guard !Task.isCancelled else {
                 return
             }
-            Darwin.kill(runner.processIdentifier, SIGKILL)
-
-            for _ in 0..<20 {
-                guard !Task.isCancelled else {
-                    return
-                }
-                if !processExists(runner.processIdentifier) {
-                    completeMigration(of: runner, to: project)
-                    return
-                }
-                try? await Task.sleep(for: .milliseconds(100))
-            }
-
             migrationTasks[project.id] = nil
             migratingProcessIdentifiers[project.id] = nil
             states[project.id] = .failed("The existing Amp runner did not stop.")

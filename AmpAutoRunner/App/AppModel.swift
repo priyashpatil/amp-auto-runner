@@ -103,50 +103,44 @@ final class AppModel {
 
     private func observeRunningRunners() {
         runners.$runningRunners
-            .sink { [weak self] runningRunners in
-                self?.autoStartSavedProjects(afterDiscovering: runningRunners)
+            .sink { [weak self] _ in
+                self?.autoStartSavedProjects()
             }
             .store(in: &cancellables)
     }
 
-    private func autoStartSavedProjects(afterDiscovering runningRunners: [RunningRunner]) {
+    private func autoStartSavedProjects() {
         guard runners.hasCompletedInitialScan, !didAutoStartProjects else {
             return
         }
 
         didAutoStartProjects = true
-        for project in projects.projects where
-            project.startsAutomatically
-                && !runningRunners.contains(where: {
-                    $0.path == project.path || $0.runnerID == project.runnerID
-                })
-        {
+        for project in projects.projects where project.startsAutomatically {
             runners.start(project, automatically: true)
         }
     }
 
-    private func migrateOrStart(
-        _ project: RunnerProject,
-        among runningRunners: [RunningRunner]? = nil,
-        automatically: Bool = false
-    ) {
-        let candidates = runningRunners ?? runners.runningRunners
-        let runningRunner = candidates.first { $0.path == project.path }
-            ?? candidates.first { $0.runnerID == project.runnerID }
-
-        if let runningRunner {
+    private func migrateOrStart(_ project: RunnerProject) {
+        let match = RunnerMatcher.runner(
+            for: project,
+            among: projects.projects,
+            and: runners.runningRunners
+        )
+        if case let .matched(runningRunner) = match {
             if !runners.isOwned(runningRunner) {
                 runners.migrate(runningRunner, to: project)
             }
             return
         }
 
-        runners.start(project, automatically: automatically)
+        runners.start(project)
     }
 
     func project(for runner: RunningRunner) -> RunnerProject? {
-        projects.projects.first { project in
-            project.path == runner.path || project.runnerID == runner.runnerID
-        }
+        RunnerMatcher.project(
+            for: runner,
+            among: projects.projects,
+            and: runners.runningRunners
+        )
     }
 }

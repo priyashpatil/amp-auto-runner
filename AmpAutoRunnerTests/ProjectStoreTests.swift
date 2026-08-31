@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 @testable import AmpAutoRunner
 
@@ -35,6 +36,44 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertEqual(adoptedProject.id, originalProject.id)
         XCTAssertEqual(adoptedProject.runnerID, "existing-runner")
         XCTAssertEqual(restoredStore.projects, [adoptedProject])
+    }
+
+    func testAdoptingDuplicateRunnerIDsCreatesUniqueSavedIDs() throws {
+        let suiteName = "ProjectStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let store = ProjectStore(defaults: defaults)
+        let firstProject = store.add(
+            directoryURL: URL(fileURLWithPath: "/tmp/first"),
+            runnerID: "shared-runner"
+        )
+        let secondProject = store.add(
+            directoryURL: URL(fileURLWithPath: "/tmp/second"),
+            runnerID: "shared-runner"
+        )
+
+        XCTAssertEqual(firstProject.runnerID, "shared-runner")
+        XCTAssertEqual(secondProject.runnerID, "shared-runner-2")
+        XCTAssertEqual(Set(store.projects.map(\.runnerID)).count, 2)
+    }
+
+    func testDuplicatePersistedRunnerIDsAreRepaired() throws {
+        let suiteName = "ProjectStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let storedProjects = [
+            RunnerProject(path: "/tmp/first", runnerID: "shared-runner"),
+            RunnerProject(path: "/tmp/second", runnerID: "shared-runner"),
+        ]
+        defaults.set(try JSONEncoder().encode(storedProjects), forKey: "runnerProjects")
+
+        let store = ProjectStore(defaults: defaults)
+        let restoredStore = ProjectStore(defaults: defaults)
+
+        XCTAssertEqual(store.projects.map(\.runnerID), ["shared-runner", "shared-runner-2"])
+        XCTAssertEqual(restoredStore.projects, store.projects)
     }
 
     func testRunningRunnerIsManagedOnlyAfterItsProjectIsSaved() throws {
@@ -139,6 +178,46 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertTrue(model.isManaged(runner))
         guard case .failed = runners.state(for: try XCTUnwrap(store.projects.first)) else {
             return XCTFail("The app should start its replacement after stopping the external runner")
+        }
+    }
+
+    func testMigrationDoesNotKillAProcessThatIgnoresTermination() async throws {
+        let externalProcess = Process()
+        externalProcess.executableURL = URL(fileURLWithPath: "/bin/sh")
+        externalProcess.arguments = [
+            "-c",
+            "trap '' TERM; exec /usr/bin/tail -f /dev/null",
+        ]
+        try externalProcess.run()
+        defer {
+            if externalProcess.isRunning {
+                Darwin.kill(externalProcess.processIdentifier, SIGKILL)
+            }
+            externalProcess.waitUntilExit()
+        }
+        try await Task.sleep(for: .milliseconds(100))
+
+        let project = RunnerProject(path: "/tmp/example-project")
+        let runner = RunningRunner(
+            processIdentifier: externalProcess.processIdentifier,
+            runnerID: project.runnerID,
+            path: project.path,
+            command: "amp --no-tui --runner-id \(project.runnerID)"
+        )
+        let runners = RunnerManager()
+
+        runners.migrate(runner, to: project)
+
+        for _ in 0..<60 {
+            if case .failed = runners.state(for: project) {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+
+        XCTAssertTrue(externalProcess.isRunning)
+        guard case .failed = runners.state(for: project) else {
+            return XCTFail("Migration should fail when the runner ignores SIGTERM")
         }
     }
 
