@@ -364,8 +364,7 @@ private struct RunnerIDEditor: View {
     var body: some View {
         TextField("Runner ID", text: $runnerID)
             .font(.caption.monospaced())
-            .textFieldStyle(.roundedBorder)
-            .controlSize(.small)
+            .textFieldStyle(.plain)
             .focused($isFocused)
             .onSubmit(save)
             .onChange(of: isFocused) { _, isFocused in

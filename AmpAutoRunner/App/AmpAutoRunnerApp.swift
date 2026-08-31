@@ -34,5 +34,33 @@ struct AmpAutoRunnerApp: App {
         }
         .defaultSize(width: 900, height: 600)
         .windowToolbarStyle(.unifiedCompact)
+
+        MenuBarExtra("Amp Auto Runner", systemImage: "bolt.fill") {
+            StatusBarMenu()
+        }
+        .menuBarExtraStyle(.menu)
+    }
+}
+
+private struct StatusBarMenu: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button {
+            showWindow(id: "main")
+        } label: {
+            Label("Open Runners", systemImage: "macwindow")
+        }
+
+        Button {
+            showWindow(id: "runner-logs")
+        } label: {
+            Label("Show Runner Logs", systemImage: "terminal")
+        }
+    }
+
+    private func showWindow(id: String) {
+        openWindow(id: id)
+        NSApplication.shared.activate(ignoringOtherApps: true)
     }
 }
