@@ -272,11 +272,10 @@ struct RunnerDashboardView: View {
     }
 
     private var runningSummary: String {
-        let activeCount = model.activeRunnerCount
-        let availableCount = runners.runningRunners.filter { !model.isManaged($0) }.count
-        let activeSummary = activeCount == 1 ? "1 active" : "\(activeCount) active"
-        let availableSummary = availableCount == 1 ? "1 available" : "\(availableCount) available"
-        return "\(activeSummary) · \(availableSummary)"
+        let rows = tableRows
+        let runningCount = rows.filter { $0.runner != nil || $0.state == .running }.count
+        let totalSummary = rows.count == 1 ? "1 runner" : "\(rows.count) total"
+        return "\(runningCount) running · \(totalSummary)"
     }
 }
 

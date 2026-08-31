@@ -53,10 +53,6 @@ final class AppModel {
         project(for: runner) != nil
     }
 
-    var activeRunnerCount: Int {
-        projects.projects.filter { runners.state(for: $0) == .running }.count
-    }
-
     @discardableResult
     func addProject(directoryURL: URL) -> RunnerProject {
         let project = projects.add(directoryURL: directoryURL)

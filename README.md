@@ -4,6 +4,11 @@ Amp Auto Runner is an unofficial native macOS desktop app for keeping local
 Amp runners available across multiple projects. It is an independent
 open-source project and is not affiliated with or endorsed by Amp.
 
+> [!IMPORTANT]
+> Runner management like this may eventually be provided by Amp's official
+> desktop app. Amp Auto Runner is intended to remain an experimental project,
+> not become an official product, and may be discontinued at any time.
+
 Choose **Add Project** and select a folder. The app saves the project, creates
 a stable runner ID, enables Auto Start, and launches its runner immediately.
 It also discovers compatible runners that were started manually:
