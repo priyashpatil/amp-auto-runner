@@ -1,6 +1,10 @@
 import SwiftUI
 
 struct RunnerLogsView: View {
+    private enum ScrollAnchor: Hashable {
+        case bottom
+    }
+
     @ObservedObject var runners: RunnerManager
 
     @AppStorage("runnerLogsFontSize") private var fontSize = 12.0
@@ -34,16 +38,27 @@ struct RunnerLogsView: View {
     }
 
     private var terminal: some View {
-        ScrollView {
-            Text(displayedOutput)
-                .font(.system(size: fontSize, design: .monospaced))
-                .lineSpacing(2)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
-                .padding(12)
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 0) {
+                    Text(displayedOutput)
+                        .font(.system(size: fontSize, design: .monospaced))
+                        .lineSpacing(2)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                        .padding(12)
+
+                    Color.clear
+                        .frame(height: 1)
+                        .id(ScrollAnchor.bottom)
+                }
+            }
+            .defaultScrollAnchor(.bottom)
+            .onChange(of: runners.capturedTerminalOutput) {
+                proxy.scrollTo(ScrollAnchor.bottom, anchor: .bottom)
+            }
+            .background(Color(red: 0.055, green: 0.06, blue: 0.07))
         }
-        .defaultScrollAnchor(.bottom)
-        .background(Color(red: 0.055, green: 0.06, blue: 0.07))
     }
 
     private var displayedOutput: AttributedString {
