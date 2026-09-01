@@ -4,6 +4,7 @@ import ServiceManagement
 @MainActor
 final class LaunchAtLoginController: ObservableObject {
     @Published private(set) var isEnabled = false
+    @Published private(set) var requiresApproval = false
     @Published private(set) var message: String?
 
     init() {
@@ -20,17 +21,27 @@ final class LaunchAtLoginController: ObservableObject {
                 try SMAppService.mainApp.unregister()
             }
         } catch {
-            message = error.localizedDescription
+            let errorMessage = error.localizedDescription
+            refresh()
+            if !requiresApproval {
+                message = errorMessage
+            }
+            return
         }
 
         refresh()
-
-        if enabled, SMAppService.mainApp.status == .requiresApproval {
-            message = "Approve Amp Auto Runner in System Settings → General → Login Items."
-        }
     }
 
-    private func refresh() {
-        isEnabled = SMAppService.mainApp.status == .enabled
+    func refresh() {
+        let status = SMAppService.mainApp.status
+        isEnabled = status == .enabled
+        requiresApproval = status == .requiresApproval
+        message = requiresApproval
+            ? "Allow Amp Auto Runner in System Settings → General → Login Items."
+            : nil
+    }
+
+    func openLoginItemsSettings() {
+        SMAppService.openSystemSettingsLoginItems()
     }
 }

@@ -395,7 +395,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.priyashpatil.AmpAutoRunner;
+				PRODUCT_BUNDLE_IDENTIFIER = com.priyashpatil.AmpAutoRunner.debug;
 				PRODUCT_MODULE_NAME = AmpAutoRunner;
 				PRODUCT_NAME = "Amp Auto Runner";
 				SWIFT_EMIT_LOC_STRINGS = YES;
