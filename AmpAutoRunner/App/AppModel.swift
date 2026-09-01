@@ -2,10 +2,13 @@ import Combine
 import Foundation
 
 @MainActor
-final class AppModel {
+final class AppModel: ObservableObject {
     let projects: ProjectStore
     let runners: RunnerManager
     let launchAtLogin: LaunchAtLoginController
+
+    @Published private(set) var showsRunnerList = true
+    @Published private(set) var showsRunnerLogs = false
 
     private var didStartMonitoring = false
     private var didAutoStartProjects = false
@@ -36,6 +39,28 @@ final class AppModel {
 
         didStartMonitoring = true
         runners.startMonitoring()
+    }
+
+    func toggleRunnerList() {
+        setRunnerListVisible(!showsRunnerList)
+    }
+
+    func setRunnerListVisible(_ isVisible: Bool) {
+        if !isVisible, !showsRunnerLogs {
+            showsRunnerLogs = true
+        }
+        showsRunnerList = isVisible
+    }
+
+    func toggleRunnerLogs() {
+        setRunnerLogsVisible(!showsRunnerLogs)
+    }
+
+    func setRunnerLogsVisible(_ isVisible: Bool) {
+        if !isVisible, !showsRunnerList {
+            showsRunnerList = true
+        }
+        showsRunnerLogs = isVisible
     }
 
     func setAutoStarts(_ autoStarts: Bool, for project: RunnerProject) {

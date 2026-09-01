@@ -1,40 +1,48 @@
 import SwiftUI
 
+enum RunnerTheme {
+    static let windowBackground = Color(nsColor: .windowBackgroundColor)
+    static let panelBackground = Color(nsColor: .controlBackgroundColor)
+    static let listBackground = Color(nsColor: .underPageBackgroundColor)
+    static let terminalBackground = Color(red: 0.025, green: 0.028, blue: 0.032)
+}
+
 struct RunnerLogsView: View {
     private enum ScrollAnchor: Hashable {
         case bottom
     }
 
     @ObservedObject var runners: RunnerManager
-
-    @AppStorage("runnerLogsFontSize") private var fontSize = 12.0
+    @Binding var isPresented: Bool
+    let fontSize: Double
 
     var body: some View {
-        terminal
-            .frame(minWidth: 700, minHeight: 460)
-            .preferredColorScheme(.dark)
-            .toolbar {
-                ToolbarItemGroup {
-                    Button {
-                        fontSize = max(10, fontSize - 1)
-                    } label: {
-                        Image(systemName: "minus")
-                    }
-                    .disabled(fontSize <= 10)
-                    .help("Decrease font size")
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "terminal")
+                Text("Runner Logs")
+                    .font(.system(size: fontSize, weight: .semibold, design: .monospaced))
 
-                    Text("\(Int(fontSize)) pt")
-                        .font(.caption.monospacedDigit())
+                Spacer()
 
-                    Button {
-                        fontSize = min(18, fontSize + 1)
-                    } label: {
-                        Image(systemName: "plus")
-                    }
-                    .disabled(fontSize >= 18)
-                    .help("Increase font size")
+                Button {
+                    isPresented = false
+                } label: {
+                    Image(systemName: "xmark")
                 }
+                .help("Hide runner logs")
             }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 12)
+            .frame(height: 40)
+            .background(RunnerTheme.panelBackground)
+
+            Divider()
+            terminal
+        }
+        .background(RunnerTheme.terminalBackground)
+        .preferredColorScheme(.dark)
     }
 
     private var terminal: some View {
@@ -57,7 +65,7 @@ struct RunnerLogsView: View {
             .onChange(of: runners.capturedTerminalOutput) {
                 proxy.scrollTo(ScrollAnchor.bottom, anchor: .bottom)
             }
-            .background(Color(red: 0.055, green: 0.06, blue: 0.07))
+            .background(RunnerTheme.terminalBackground)
         }
     }
 

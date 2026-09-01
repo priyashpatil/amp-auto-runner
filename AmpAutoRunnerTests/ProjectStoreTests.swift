@@ -4,6 +4,23 @@ import XCTest
 
 @MainActor
 final class ProjectStoreTests: XCTestCase {
+    func testRunnerListAndLogsCannotBothBeHidden() {
+        let model = AppModel()
+
+        XCTAssertTrue(model.showsRunnerList)
+        XCTAssertFalse(model.showsRunnerLogs)
+
+        model.setRunnerListVisible(false)
+
+        XCTAssertFalse(model.showsRunnerList)
+        XCTAssertTrue(model.showsRunnerLogs)
+
+        model.setRunnerLogsVisible(false)
+
+        XCTAssertTrue(model.showsRunnerList)
+        XCTAssertFalse(model.showsRunnerLogs)
+    }
+
     func testProjectsPersistAndDuplicatePathsAreIgnored() throws {
         let suiteName = "ProjectStoreTests-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

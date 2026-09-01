@@ -68,6 +68,28 @@ final class RunnerProjectTests: XCTestCase {
         )
     }
 
+    func testRunnerEnvironmentAddsExecutableLocationsMissingFromGUIPath() {
+        let path = RunnerEnvironment.executableSearchPath(
+            inheritedPath: "/usr/bin:/bin:/usr/bin",
+            homeDirectory: URL(fileURLWithPath: "/Users/example", isDirectory: true),
+            ampExecutableURL: URL(fileURLWithPath: "/Users/example/.local/bin/amp")
+        )
+        let components = path.split(separator: ":").map(String.init)
+
+        XCTAssertEqual(Array(components.prefix(3)), ["/usr/bin", "/bin", "/usr/bin"])
+        XCTAssertEqual(components.filter { $0 == "/Users/example/.local/bin" }.count, 1)
+        XCTAssertTrue(components.contains("/opt/homebrew/bin"))
+        XCTAssertTrue(components.contains("/usr/local/bin"))
+    }
+
+    func testRunnerEnvironmentUsesConfiguredLoginShell() {
+        let shell = RunnerEnvironment.loginShellURL(
+            inheritedEnvironment: ["SHELL": "/bin/bash"]
+        )
+
+        XCTAssertEqual(shell.path, "/bin/bash")
+    }
+
     func testRunnerMatchingPrefersKnownPathOverCollidingRunnerID() {
         let firstProject = RunnerProject(path: "/tmp/first", runnerID: "shared-runner")
         let secondProject = RunnerProject(path: "/tmp/second", runnerID: "second-runner")

@@ -2,98 +2,246 @@ import AppKit
 import SwiftUI
 
 struct RunnerDashboardView: View {
-    private let model: AppModel
-
-    @Environment(\.openWindow) private var openWindow
+    @ObservedObject private var model: AppModel
     @ObservedObject private var projects: ProjectStore
     @ObservedObject private var runners: RunnerManager
-    @ObservedObject private var launchAtLogin: LaunchAtLoginController
+    @AppStorage("runnerLogsHeight") private var savedRunnerLogsHeight = 0.0
+    @AppStorage("runnerLogsFontSize") private var interfaceFontSize = 13.0
     @State private var hoveredRunnerID: RunnerTableRow.ID?
+    @State private var runnerLogsDragStart: CGFloat?
+    @State private var runnerLogsDragHeight: CGFloat?
 
     init(model: AppModel) {
         self.model = model
         projects = model.projects
         runners = model.runners
-        launchAtLogin = model.launchAtLogin
     }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
-            content
+
+            GeometryReader { geometry in
+                if model.showsRunnerList, model.showsRunnerLogs {
+                    splitLayout(in: geometry.size)
+                } else if model.showsRunnerList {
+                    content
+                } else {
+                    runnerLogsPane
+                }
+            }
         }
-        .frame(minWidth: 760, minHeight: 480)
+        .frame(minWidth: 600, minHeight: 320)
+        .background(RunnerTheme.windowBackground)
+        .preferredColorScheme(.dark)
+    }
+
+    private var runnerLogsPane: some View {
+        RunnerLogsView(
+            runners: runners,
+            isPresented: runnerLogsBinding,
+            fontSize: interfaceFontSize
+        )
+    }
+
+    private func splitLayout(in size: CGSize) -> some View {
+        let dividerHeight: CGFloat = 9
+        let minimumRunnerHeight: CGFloat = 96
+        let minimumLogsHeight: CGFloat = 96
+        let maximumLogsHeight = max(
+            minimumLogsHeight,
+            size.height - dividerHeight - minimumRunnerHeight
+        )
+        let defaultLogsHeight = (size.height - dividerHeight) / 2
+        let requestedLogsHeight = runnerLogsDragHeight
+            ?? (savedRunnerLogsHeight > 0
+                ? CGFloat(savedRunnerLogsHeight)
+                : defaultLogsHeight)
+        let logsHeight = min(
+            max(requestedLogsHeight, minimumLogsHeight),
+            maximumLogsHeight
+        )
+
+        return VStack(spacing: 0) {
+            content
+                .frame(height: size.height - dividerHeight - logsHeight)
+
+            runnerLogsDivider(
+                currentHeight: logsHeight,
+                minimumHeight: minimumLogsHeight,
+                maximumHeight: maximumLogsHeight
+            )
+
+            runnerLogsPane
+                .frame(height: logsHeight)
+        }
+    }
+
+    private func runnerLogsDivider(
+        currentHeight: CGFloat,
+        minimumHeight: CGFloat,
+        maximumHeight: CGFloat
+    ) -> some View {
+        ZStack {
+            RunnerTheme.panelBackground
+            Capsule()
+                .fill(Color.secondary.opacity(0.55))
+                .frame(width: 34, height: 3)
+        }
+        .frame(height: 9)
+        .contentShape(Rectangle())
+        .help("Drag to resize runner logs")
+        .onContinuousHover { phase in
+            switch phase {
+            case .active:
+                NSCursor.resizeUpDown.set()
+            case .ended:
+                NSCursor.arrow.set()
+            }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                .onChanged { value in
+                    if runnerLogsDragStart == nil {
+                        runnerLogsDragStart = currentHeight
+                    }
+                    guard let runnerLogsDragStart else {
+                        return
+                    }
+                    let newHeight = runnerLogsDragStart - value.translation.height
+                    runnerLogsDragHeight = min(
+                        max(newHeight, minimumHeight),
+                        maximumHeight
+                    )
+                }
+                .onEnded { _ in
+                    if let runnerLogsDragHeight {
+                        savedRunnerLogsHeight = Double(runnerLogsDragHeight)
+                    }
+                    runnerLogsDragStart = nil
+                    runnerLogsDragHeight = nil
+                }
+        )
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center, spacing: 12) {
-                Image(nsImage: NSApplication.shared.applicationIconImage)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 38, height: 38)
-                    .accessibilityHidden(true)
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color(red: 0.19, green: 0.20, blue: 0.24),
+                                    Color(red: 0.07, green: 0.075, blue: 0.10),
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.white.opacity(0.22), lineWidth: 1)
+                    Image(systemName: "bolt.fill")
+                        .font(.system(size: 21, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
+                .frame(width: 38, height: 38)
+                .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Runners")
-                        .font(.title2.weight(.semibold))
+                    HStack(spacing: 7) {
+                        Text("RUNNERS")
+                            .font(
+                                .system(
+                                    size: interfaceFontSize + 1,
+                                    weight: .semibold,
+                                    design: .monospaced
+                                )
+                            )
+                            .lineLimit(1)
+#if DEBUG
+                        Text("DEBUG")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(.orange, in: RoundedRectangle(cornerRadius: 3))
+#endif
+                    }
                     Text(runningSummary)
+                        .font(
+                            .system(
+                                size: max(10, interfaceFontSize - 2),
+                                design: .monospaced
+                            )
+                        )
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
 
                 Spacer()
 
-                Button(action: chooseProject) {
-                    Label("Add Project", systemImage: "plus")
-                }
-                .buttonStyle(.bordered)
-
-                Button {
-                    openWindow(id: "runner-logs")
-                    NSApplication.shared.activate(ignoringOtherApps: true)
-                } label: {
-                    Label("Runner Logs", systemImage: "terminal")
-                }
-                .buttonStyle(.bordered)
-
-                Divider()
-                    .frame(height: 22)
-
-                Toggle(
-                    "Launch at Login",
-                    isOn: Binding(
-                        get: { launchAtLogin.isEnabled },
-                        set: launchAtLogin.setEnabled
-                    )
-                )
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .fixedSize()
-            }
-
-            if let message = launchAtLogin.message {
-                HStack(spacing: 8) {
-                    Spacer()
-                    Text(message)
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-
-                    if launchAtLogin.requiresApproval {
-                        Button("Open Login Items") {
-                            launchAtLogin.openLoginItemsSettings()
-                        }
-                        .controlSize(.small)
-                    }
-                }
+                headerControls
             }
         }
-        .padding(20)
-        .onReceive(
-            NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
-        ) { _ in
-            launchAtLogin.refresh()
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background(RunnerTheme.panelBackground)
+    }
+
+    private var headerControls: some View {
+        HStack(spacing: 8) {
+            Button(action: chooseProject) {
+                Label("Add Project", systemImage: "plus")
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Add Project")
+            .help("Add Project")
+
+            Toggle(isOn: runnerListBinding) {
+                Label("Runners", systemImage: "list.bullet")
+            }
+            .toggleStyle(.button)
+            .buttonStyle(.bordered)
+            .accessibilityLabel(model.showsRunnerList ? "Hide Runners" : "Show Runners")
+            .help(model.showsRunnerList ? "Hide Runners" : "Show Runners")
+
+            Toggle(isOn: runnerLogsBinding) {
+                Label("Logs", systemImage: "terminal")
+            }
+            .toggleStyle(.button)
+            .buttonStyle(.bordered)
+            .accessibilityLabel(
+                model.showsRunnerLogs ? "Hide Runner Logs" : "Show Runner Logs"
+            )
+            .help(model.showsRunnerLogs ? "Hide Runner Logs" : "Show Runner Logs")
+
+            SettingsLink {
+                Image(systemName: "gearshape")
+                    .frame(width: 16, height: 16)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Settings")
+            .help("Settings (⌘,)")
         }
+        .font(.system(size: interfaceFontSize))
+        .controlSize(.large)
+        .fixedSize()
+    }
+
+    private var runnerListBinding: Binding<Bool> {
+        Binding(
+            get: { model.showsRunnerList },
+            set: model.setRunnerListVisible
+        )
+    }
+
+    private var runnerLogsBinding: Binding<Bool> {
+        Binding(
+            get: { model.showsRunnerLogs },
+            set: model.setRunnerLogsVisible
+        )
     }
 
     @ViewBuilder
@@ -135,24 +283,39 @@ struct RunnerDashboardView: View {
                     Image(systemName: row.project == nil ? "terminal" : "folder.fill")
                         .foregroundStyle(.secondary)
                     Text(row.name)
-                        .fontWeight(.medium)
+                        .font(
+                            .system(
+                                size: interfaceFontSize,
+                                weight: .medium,
+                                design: .monospaced
+                            )
+                        )
                         .lineLimit(1)
                 }
                 .help(row.path ?? "Working directory unavailable")
             }
-            .width(min: 150, ideal: 210)
+            .width(min: 110, ideal: 190)
 
             TableColumn("Runner ID") { row in
                 if let project = row.project, row.canEditRunnerID {
-                    RunnerIDEditor(project: project, model: model)
+                    RunnerIDEditor(
+                        project: project,
+                        model: model,
+                        fontSize: interfaceFontSize
+                    )
                 } else {
                     Text(row.runnerID)
-                        .font(.caption.monospaced())
+                        .font(
+                            .system(
+                                size: max(10, interfaceFontSize - 1),
+                                design: .monospaced
+                            )
+                        )
                         .lineLimit(1)
                         .help(row.runnerID)
                 }
             }
-            .width(min: 170, ideal: 230)
+            .width(min: 130, ideal: 210)
 
             TableColumn("Status") { row in
                 HStack(spacing: 6) {
@@ -160,11 +323,16 @@ struct RunnerDashboardView: View {
                         .fill(row.statusColor)
                         .frame(width: 7, height: 7)
                     Text(row.statusLabel)
-                        .font(.caption)
+                        .font(
+                            .system(
+                                size: max(10, interfaceFontSize - 1),
+                                design: .monospaced
+                            )
+                        )
                         .lineLimit(1)
                 }
             }
-            .width(100)
+            .width(86)
 
             TableColumn("Auto Run") { row in
                 HStack {
@@ -178,19 +346,22 @@ struct RunnerDashboardView: View {
                     Spacer(minLength: 0)
                 }
             }
-            .width(72)
+            .width(64)
 
             TableColumn("") { row in
                 if let project = row.project {
-                    Button("Remove") {
+                    Button {
                         model.remove(project)
+                    } label: {
+                        Image(systemName: "minus.circle")
                     }
                     .buttonStyle(.borderless)
+                    .accessibilityLabel("Remove runner")
                     .help("Remove runner")
                     .frame(maxWidth: .infinity)
                 }
             }
-            .width(60)
+            .width(28)
         } rows: {
             ForEach(rows) { row in
                 TableRow(row)
@@ -204,6 +375,8 @@ struct RunnerDashboardView: View {
             }
         }
         .tableStyle(.inset(alternatesRowBackgrounds: true))
+        .scrollContentBackground(.hidden)
+        .background(RunnerTheme.listBackground)
     }
 
     private var hoverSelection: Binding<RunnerTableRow.ID?> {
@@ -397,19 +570,21 @@ private struct RunnerTableRow: Identifiable {
 private struct RunnerIDEditor: View {
     let project: RunnerProject
     let model: AppModel
+    let fontSize: Double
 
     @State private var runnerID: String
     @FocusState private var isFocused: Bool
 
-    init(project: RunnerProject, model: AppModel) {
+    init(project: RunnerProject, model: AppModel, fontSize: Double) {
         self.project = project
         self.model = model
+        self.fontSize = fontSize
         _runnerID = State(initialValue: project.runnerID)
     }
 
     var body: some View {
         TextField("Runner ID", text: $runnerID)
-            .font(.caption.monospaced())
+            .font(.system(size: max(10, fontSize - 1), design: .monospaced))
             .textFieldStyle(.plain)
             .focused($isFocused)
             .onSubmit(save)

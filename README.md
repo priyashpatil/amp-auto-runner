@@ -23,7 +23,8 @@ amp --no-tui --runner-id <project-runner-id> --remote-control-terminal
 
 ## Current features
 
-- Native SwiftUI desktop dashboard
+- Native SwiftUI desktop dashboard with a terminal-style dark appearance
+- One resizable window that restores its last size and screen position
 - One prioritized runner table with auto-start and active runners first
 - Direct project-folder addition and removal
 - Discovery of headless Ampcode runners started by this app or elsewhere
@@ -33,8 +34,9 @@ amp --no-tui --runner-id <project-runner-id> --remote-control-terminal
 - Per-project Auto Start controls for app launch
 - Compact start, stop, and remove controls for saved projects
 - macOS Launch at Login control
-- A single colored terminal view showing the real PTY stdout and stderr from
-  all app-launched runners, including ANSI, 256-color, and true-color output
+- A collapsible, vertically resizable runner-log pane showing the real PTY
+  stdout and stderr from all app-launched runners, including ANSI, 256-color,
+  and true-color output
 - Runner failure details in the dashboard
 
 ## Requirements
@@ -80,15 +82,20 @@ preserved. For a system-wide installation, use `/Applications` instead of
 
 ## Development
 
-Open `AmpAutoRunner.xcodeproj` in Xcode, or build and test from the command
-line:
+Debug builds use a separate `com.priyashpatil.AmpAutoRunner.debug` identity and
+appear as **Amp Auto Runner Debug**. They do not support Launch at Login, so they
+can be developed alongside an installed production copy without replacing it.
+
+Use the repository development workflow to keep one canonical Debug build:
 
 ```sh
-xcodebuild -project AmpAutoRunner.xcodeproj \
-  -scheme AmpAutoRunner \
-  -destination 'platform=macOS' \
-  test
+.agents/skills/developing-amp-auto-runner/scripts/debug-app.sh build
+.agents/skills/developing-amp-auto-runner/scripts/debug-app.sh test
+.agents/skills/developing-amp-auto-runner/scripts/debug-app.sh run
 ```
+
+The workflow never quits, replaces, opens, or unregisters the production app.
+Open `AmpAutoRunner.xcodeproj` in Xcode when interactive debugging is needed.
 
 The app is intentionally not sandboxed because each Ampcode runner needs to run
 commands and modify files in its project directory. When an existing terminal

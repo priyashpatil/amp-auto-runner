@@ -12,6 +12,9 @@ final class LaunchAtLoginController: ObservableObject {
     }
 
     func setEnabled(_ enabled: Bool) {
+        guard AppIdentity.supportsLaunchAtLogin else {
+            return
+        }
         message = nil
 
         do {
@@ -33,6 +36,12 @@ final class LaunchAtLoginController: ObservableObject {
     }
 
     func refresh() {
+        guard AppIdentity.supportsLaunchAtLogin else {
+            isEnabled = false
+            requiresApproval = false
+            message = nil
+            return
+        }
         let status = SMAppService.mainApp.status
         isEnabled = status == .enabled
         requiresApproval = status == .requiresApproval
