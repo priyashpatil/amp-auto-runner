@@ -1,3 +1,4 @@
+import Combine
 import XCTest
 @testable import AmpAutoRunner
 
@@ -176,5 +177,130 @@ final class RunnerProjectTests: XCTestCase {
         )
 
         XCTAssertEqual(String(formatted.characters), "open T-example now")
+    }
+
+    func testTerminalFormatterCarriesIncompleteANSISequencesAcrossAppends() {
+        var parser = TerminalTextFormatter.Parser()
+
+        let first = parser.nsAttributedString(for: "plain \u{001B}[3")
+        let second = parser.nsAttributedString(for: "1mred\u{001B}[0m text")
+
+        XCTAssertEqual(first.string, "plain ")
+        XCTAssertEqual(second.string, "red text")
+        XCTAssertGreaterThan(second.length, 0)
+    }
+
+    func testTerminalFormatterCarriesSplitLineEndingsAcrossAppends() {
+        var parser = TerminalTextFormatter.Parser()
+
+        let first = parser.nsAttributedString(for: "first\r")
+        let second = parser.nsAttributedString(for: "\nsecond")
+
+        XCTAssertEqual(first.string, "first")
+        XCTAssertEqual(second.string, "\nsecond")
+    }
+
+    @MainActor
+    func testTerminalTextCoordinatorIgnoresUnchangedSnapshotsAndAppendsNewOutput() {
+        let textView = NSTextView()
+        let coordinator = TerminalTextView.Coordinator()
+        coordinator.attach(textView)
+
+        coordinator.apply(
+            RunnerLogSnapshot(
+                revision: 1,
+                retainedOutput: "plain \u{001B}[3",
+                appendedOutput: "plain \u{001B}[3"
+            ),
+            fontSize: 12
+        )
+        XCTAssertEqual(textView.string, "plain ")
+
+        coordinator.apply(
+            RunnerLogSnapshot(
+                revision: 1,
+                retainedOutput: "this must not replace the rendered output",
+                appendedOutput: "ignored"
+            ),
+            fontSize: 12
+        )
+        XCTAssertEqual(textView.string, "plain ")
+
+        coordinator.apply(
+            RunnerLogSnapshot(
+                revision: 2,
+                retainedOutput: "plain \u{001B}[31mred\u{001B}[0m text",
+                appendedOutput: "1mred\u{001B}[0m text"
+            ),
+            fontSize: 12
+        )
+        XCTAssertEqual(textView.string, "plain red text")
+    }
+
+    @MainActor
+    func testRunnerLogStoreCoalescesAndBoundsPendingOutput() {
+        let logs = RunnerLogStore(
+            maximumHistoryBytes: 12,
+            publishInterval: 60
+        )
+
+        logs.append(Data("first\n".utf8))
+        logs.append(Data("second\n".utf8))
+
+        XCTAssertEqual(logs.snapshot, .empty)
+
+        logs.flushPendingOutput()
+
+        XCTAssertEqual(logs.snapshot.revision, 1)
+        XCTAssertEqual(logs.snapshot.appendedOutput, "first\nsecond\n")
+        XCTAssertEqual(logs.snapshot.retainedOutput, "second\n")
+        XCTAssertLessThanOrEqual(logs.snapshot.retainedOutput.utf8.count, 12)
+    }
+
+    @MainActor
+    func testRunnerLogStorePreservesUTF8AcrossFlushBoundaries() {
+        let logs = RunnerLogStore(publishInterval: 60)
+        let bytes = Array("A🙂B".utf8)
+
+        logs.append(Data(bytes.prefix(3)))
+        logs.flushPendingOutput()
+        XCTAssertEqual(logs.snapshot.retainedOutput, "A")
+
+        logs.append(Data(bytes.dropFirst(3)))
+        logs.flushPendingOutput()
+
+        XCTAssertEqual(logs.snapshot.retainedOutput, "A🙂B")
+        XCTAssertEqual(logs.snapshot.appendedOutput, "🙂B")
+    }
+
+    @MainActor
+    func testUnchangedRunnerScansDoNotPublishAgain() {
+        let manager = RunnerManager()
+        var runnerPublications = 0
+        var objectChanges = 0
+        let runnersCancellable = manager.$runningRunners
+            .dropFirst()
+            .sink { _ in runnerPublications += 1 }
+        let objectCancellable = manager.objectWillChange
+            .sink { objectChanges += 1 }
+
+        manager.applyScanResult([])
+        let changesAfterInitialScan = objectChanges
+        manager.applyScanResult([])
+
+        XCTAssertEqual(runnerPublications, 1)
+        XCTAssertEqual(objectChanges, changesAfterInitialScan)
+
+        let runner = RunningRunner(
+            processIdentifier: 1746,
+            runnerID: "example",
+            path: "/tmp/example",
+            command: "amp --no-tui --runner-id example"
+        )
+        manager.applyScanResult([runner])
+        manager.applyScanResult([runner])
+
+        XCTAssertEqual(runnerPublications, 2)
+        withExtendedLifetime((runnersCancellable, objectCancellable)) {}
     }
 }

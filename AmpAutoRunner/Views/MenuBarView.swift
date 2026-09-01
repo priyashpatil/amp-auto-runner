@@ -45,7 +45,7 @@ struct RunnerDashboardView: View {
 
     private var runnerLogsPane: some View {
         RunnerLogsView(
-            runners: runners,
+            logs: runners.logs,
             isPresented: runnerLogsBinding,
             fontSize: interfaceFontSize
         )
