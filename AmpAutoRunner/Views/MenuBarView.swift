@@ -10,6 +10,12 @@ struct RunnerDashboardView: View {
     @State private var hoveredRunnerID: RunnerTableRow.ID?
     @State private var runnerLogsDragStart: CGFloat?
     @State private var runnerLogsDragHeight: CGFloat?
+    @State private var sortOrder = [
+        KeyPathComparator(
+            \RunnerTableRow.name,
+            comparator: String.Comparator.localizedStandard
+        ),
+    ]
 
     init(model: AppModel) {
         self.model = model
@@ -271,14 +277,18 @@ struct RunnerDashboardView: View {
     }
 
     private func runnerTable(_ rows: [RunnerTableRow]) -> some View {
-        Table(of: RunnerTableRow.self, selection: hoverSelection) {
+        Table(
+            of: RunnerTableRow.self,
+            selection: hoverSelection,
+            sortOrder: $sortOrder
+        ) {
             TableColumn("") { row in
                 RunnerControl(row: row, model: model, runners: runners)
                     .frame(maxWidth: .infinity)
             }
             .width(28)
 
-            TableColumn("Project") { row in
+            TableColumn("Project", value: \.name) { row in
                 HStack(spacing: 7) {
                     Image(systemName: row.project == nil ? "terminal" : "folder.fill")
                         .foregroundStyle(.secondary)
@@ -296,7 +306,7 @@ struct RunnerDashboardView: View {
             }
             .width(min: 110, ideal: 190)
 
-            TableColumn("Runner ID") { row in
+            TableColumn("Runner ID", value: \.runnerID) { row in
                 if let project = row.project, row.canEditRunnerID {
                     RunnerIDEditor(
                         project: project,
@@ -317,7 +327,7 @@ struct RunnerDashboardView: View {
             }
             .width(min: 130, ideal: 210)
 
-            TableColumn("Status") { row in
+            TableColumn("Status", value: \.statusLabel) { row in
                 HStack(spacing: 6) {
                     Circle()
                         .fill(row.statusColor)
@@ -334,7 +344,7 @@ struct RunnerDashboardView: View {
             }
             .width(86)
 
-            TableColumn("Auto Run") { row in
+            TableColumn("Auto Run", value: \.autoRunSortValue) { row in
                 HStack {
                     Spacer(minLength: 0)
                     Toggle("Start Automatically", isOn: autoStartBinding(for: row))
@@ -443,32 +453,7 @@ struct RunnerDashboardView: View {
             )
         }
 
-        return (managed + available + stopped).sorted { left, right in
-            let leftPriority = priority(of: left)
-            let rightPriority = priority(of: right)
-            if leftPriority != rightPriority {
-                return leftPriority < rightPriority
-            }
-            return left.name.localizedStandardCompare(right.name) == .orderedAscending
-        }
-    }
-
-    private func startsAutomatically(_ row: RunnerTableRow) -> Bool {
-        guard let project = row.project else {
-            return false
-        }
-        return projects.projects.first(where: { $0.id == project.id })?
-            .startsAutomatically == true
-    }
-
-    private func priority(of row: RunnerTableRow) -> Int {
-        if startsAutomatically(row) {
-            return 0
-        }
-        if row.runner != nil || row.state == .starting || row.state == .running {
-            return 1
-        }
-        return 2
+        return (managed + available + stopped).sorted(using: sortOrder)
     }
 
     private func autoStartBinding(for row: RunnerTableRow) -> Binding<Bool> {
@@ -514,6 +499,10 @@ private struct RunnerTableRow: Identifiable {
 
     var runnerID: String {
         runner?.runnerID ?? project?.runnerID ?? "—"
+    }
+
+    var autoRunSortValue: Int {
+        project?.startsAutomatically == true ? 1 : 0
     }
 
     var canEditRunnerID: Bool {
