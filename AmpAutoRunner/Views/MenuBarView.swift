@@ -5,6 +5,7 @@ struct RunnerDashboardView: View {
     @ObservedObject private var model: AppModel
     @ObservedObject private var projects: ProjectStore
     @ObservedObject private var runners: RunnerManager
+    @ObservedObject private var launchAtLogin: LaunchAtLoginController
     @AppStorage("runnerLogsHeight") private var savedRunnerLogsHeight = 0.0
     @AppStorage("runnerLogsFontSize") private var interfaceFontSize = 13.0
     @State private var hoveredRunnerID: RunnerTableRow.ID?
@@ -21,12 +22,18 @@ struct RunnerDashboardView: View {
         self.model = model
         projects = model.projects
         runners = model.runners
+        launchAtLogin = model.launchAtLogin
     }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
+
+            if showsLaunchAtLoginNotice {
+                launchAtLoginNotice
+                Divider()
+            }
 
             GeometryReader { geometry in
                 if model.showsRunnerList, model.showsRunnerLogs {
@@ -41,6 +48,11 @@ struct RunnerDashboardView: View {
         .frame(minWidth: 600, minHeight: 320)
         .background(RunnerTheme.windowBackground)
         .preferredColorScheme(.dark)
+        .onReceive(
+            NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+        ) { _ in
+            launchAtLogin.refresh()
+        }
     }
 
     private var runnerLogsPane: some View {
@@ -234,6 +246,58 @@ struct RunnerDashboardView: View {
         .font(.system(size: interfaceFontSize))
         .controlSize(.large)
         .fixedSize()
+    }
+
+    private var showsLaunchAtLoginNotice: Bool {
+        !launchAtLogin.isEnabled
+    }
+
+    private var launchAtLoginNotice: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+
+            Text(launchAtLoginNoticeMessage)
+                .font(
+                    .system(
+                        size: max(10, interfaceFontSize - 2),
+                        design: .monospaced
+                    )
+                )
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 8)
+
+            if launchAtLogin.requiresApproval {
+                Button("Open Login Items") {
+                    launchAtLogin.openLoginItemsSettings()
+                }
+                .help("Open Login Items in System Settings")
+            } else {
+                Button(launchAtLogin.message == nil ? "Enable" : "Try Again") {
+                    launchAtLogin.setEnabled(true)
+                }
+                .disabled(!AppIdentity.supportsLaunchAtLogin)
+                .help("Enable Launch at Login")
+            }
+        }
+        .controlSize(.small)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity)
+        .background(Color.orange.opacity(0.08))
+    }
+
+    private var launchAtLoginNoticeMessage: String {
+        if launchAtLogin.requiresApproval {
+            return "Launch at Login needs approval. Auto Run runners won’t resume until it is allowed in System Settings."
+        }
+        if let message = launchAtLogin.message {
+            return "Launch at Login couldn’t be enabled. \(message)"
+        }
+        return "Launch at Login is off. Auto Run runners won’t resume after your next login."
     }
 
     private var runnerListBinding: Binding<Bool> {
