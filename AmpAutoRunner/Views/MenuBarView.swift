@@ -72,13 +72,27 @@ struct RunnerDashboardView: View {
             }
 
             if let message = launchAtLogin.message {
-                Text(message)
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
+                HStack(spacing: 8) {
+                    Spacer()
+                    Text(message)
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+
+                    if launchAtLogin.requiresApproval {
+                        Button("Open Login Items") {
+                            launchAtLogin.openLoginItemsSettings()
+                        }
+                        .controlSize(.small)
+                    }
+                }
             }
         }
         .padding(20)
+        .onReceive(
+            NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+        ) { _ in
+            launchAtLogin.refresh()
+        }
     }
 
     @ViewBuilder
