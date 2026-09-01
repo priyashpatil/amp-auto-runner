@@ -113,6 +113,189 @@ private struct RunnerTerminal {
     let slave: FileHandle
 }
 
+struct RunnerLogSnapshot: Equatable {
+    let revision: UInt64
+    let retainedOutput: String
+    let appendedOutput: String
+
+    static let empty = RunnerLogSnapshot(
+        revision: 0,
+        retainedOutput: "",
+        appendedOutput: ""
+    )
+}
+
+final class RunnerLogStore: ObservableObject {
+    @Published private(set) var snapshot = RunnerLogSnapshot.empty
+
+    private let maximumHistoryBytes: Int
+    private let publishInterval: TimeInterval
+    private let queue = DispatchQueue(label: "AmpAutoRunner.runner-logs", qos: .utility)
+    private var pendingData = Data()
+    private var incompleteUTF8Data = Data()
+    private var retainedOutput = ""
+    private var revision: UInt64 = 0
+    private var scheduledFlush: DispatchWorkItem?
+
+    init(
+        maximumHistoryBytes: Int = 200_000,
+        publishInterval: TimeInterval = 0.1
+    ) {
+        self.maximumHistoryBytes = maximumHistoryBytes
+        self.publishInterval = publishInterval
+    }
+
+    func append(_ data: Data) {
+        guard !data.isEmpty else {
+            return
+        }
+
+        queue.async { [weak self] in
+            guard let self else {
+                return
+            }
+
+            self.pendingData.append(data)
+            guard self.scheduledFlush == nil else {
+                return
+            }
+
+            let workItem = DispatchWorkItem { [weak self] in
+                self?.publishPendingOutput()
+            }
+            self.scheduledFlush = workItem
+            self.queue.asyncAfter(
+                deadline: .now() + self.publishInterval,
+                execute: workItem
+            )
+        }
+    }
+
+    @MainActor
+    func flushPendingOutput() {
+        let nextSnapshot = queue.sync {
+            scheduledFlush?.cancel()
+            scheduledFlush = nil
+            return makeSnapshot()
+        }
+
+        if let nextSnapshot {
+            snapshot = nextSnapshot
+        }
+    }
+
+    private func publishPendingOutput() {
+        scheduledFlush = nil
+        guard let nextSnapshot = makeSnapshot() else {
+            return
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            self?.snapshot = nextSnapshot
+        }
+    }
+
+    private func makeSnapshot() -> RunnerLogSnapshot? {
+        guard !pendingData.isEmpty else {
+            return nil
+        }
+
+        let appendedOutput = decodePendingOutput()
+        guard !appendedOutput.isEmpty else {
+            return nil
+        }
+        retainedOutput.append(appendedOutput)
+        trimHistoryIfNeeded()
+        revision &+= 1
+
+        return RunnerLogSnapshot(
+            revision: revision,
+            retainedOutput: retainedOutput,
+            appendedOutput: appendedOutput
+        )
+    }
+
+    private func decodePendingOutput() -> String {
+        incompleteUTF8Data.append(pendingData)
+        pendingData.removeAll(keepingCapacity: true)
+
+        let maximumTrailingByteCount = min(3, incompleteUTF8Data.count)
+        for trailingByteCount in 0...maximumTrailingByteCount {
+            let prefixCount = incompleteUTF8Data.count - trailingByteCount
+            let prefix = incompleteUTF8Data.prefix(prefixCount)
+            guard let decoded = String(data: prefix, encoding: .utf8) else {
+                continue
+            }
+
+            let trailingData = incompleteUTF8Data.suffix(trailingByteCount)
+            incompleteUTF8Data = Data(trailingData)
+            return decoded
+        }
+
+        let decoded = String(decoding: incompleteUTF8Data, as: UTF8.self)
+        incompleteUTF8Data.removeAll(keepingCapacity: true)
+        return decoded
+    }
+
+    private func trimHistoryIfNeeded() {
+        let utf8 = retainedOutput.utf8
+        guard utf8.count > maximumHistoryBytes else {
+            return
+        }
+
+        let overflow = utf8.count - maximumHistoryBytes
+        var byteIndex = utf8.index(utf8.startIndex, offsetBy: overflow)
+        while byteIndex < utf8.endIndex, byteIndex.samePosition(in: retainedOutput) == nil {
+            byteIndex = utf8.index(after: byteIndex)
+        }
+
+        guard var removalEnd = byteIndex.samePosition(in: retainedOutput) else {
+            retainedOutput = ""
+            return
+        }
+
+        let alreadyAtLineBoundary = retainedOutput[..<removalEnd].last == "\n"
+        if
+            !alreadyAtLineBoundary,
+            let newline = retainedOutput[removalEnd...].firstIndex(of: "\n")
+        {
+            removalEnd = retainedOutput.index(after: newline)
+        }
+        retainedOutput.removeSubrange(..<removalEnd)
+    }
+}
+
+private final class RunnerOutputArchive {
+    private let lock = NSLock()
+    private var capturedData: [RunnerProject.ID: Data] = [:]
+
+    func reset(projectID: RunnerProject.ID) {
+        lock.lock()
+        capturedData[projectID] = Data()
+        lock.unlock()
+    }
+
+    func append(_ data: Data, projectID: RunnerProject.ID) {
+        lock.lock()
+        guard var projectData = capturedData[projectID] else {
+            lock.unlock()
+            return
+        }
+        projectData.append(data)
+        if projectData.count > 50_000 {
+            projectData.removeFirst(projectData.count - 50_000)
+        }
+        capturedData[projectID] = projectData
+        lock.unlock()
+    }
+
+    func take(projectID: RunnerProject.ID) -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        return capturedData.removeValue(forKey: projectID)
+    }
+}
+
 enum RunnerEnvironment {
     static func loginShellURL(inheritedEnvironment: [String: String]) -> URL {
         var shellPaths: [String] = []
@@ -296,12 +479,12 @@ final class RunnerManager: ObservableObject {
     @Published private(set) var states: [RunnerProject.ID: RunnerState] = [:]
     @Published private(set) var runningRunners: [RunningRunner] = []
     @Published private(set) var hasCompletedInitialScan = false
-    @Published private(set) var capturedTerminalOutput = ""
+
+    let logs = RunnerLogStore()
 
     private var processes: [RunnerProject.ID: Process] = [:]
     private var terminals: [RunnerProject.ID: RunnerTerminal] = [:]
-    private var capturedData: [RunnerProject.ID: Data] = [:]
-    private var capturedTerminalData = Data()
+    private let outputArchive = RunnerOutputArchive()
     private var projectIDsByProcessIdentifier: [Int32: RunnerProject.ID] = [:]
     private var migrationTasks: [RunnerProject.ID: Task<Void, Never>] = [:]
     private var migratingProcessIdentifiers: [RunnerProject.ID: Int32] = [:]
@@ -353,9 +536,18 @@ final class RunnerManager: ObservableObject {
                 }
 
                 self.scanInProgress = false
-                self.hasCompletedInitialScan = true
-                self.runningRunners = discoveredRunners
+                self.applyScanResult(discoveredRunners)
             }
+        }
+    }
+
+    func applyScanResult(_ discoveredRunners: [RunningRunner]) {
+        let isInitialScan = !hasCompletedInitialScan
+        if isInitialScan {
+            hasCompletedInitialScan = true
+        }
+        if isInitialScan || runningRunners != discoveredRunners {
+            runningRunners = discoveredRunners
         }
     }
 
@@ -430,9 +622,10 @@ final class RunnerManager: ObservableObject {
         }
 
         states[project.id] = .starting
-        capturedData[project.id] = Data()
+        outputArchive.reset(projectID: project.id)
 
         guard let terminal = makePseudoTerminal() else {
+            _ = outputArchive.take(projectID: project.id)
             states[project.id] = .failed("Could not create a terminal for Amp.")
             return
         }
@@ -466,15 +659,16 @@ final class RunnerManager: ObservableObject {
         )
         process.environment = environment
 
-        terminal.master.readabilityHandler = { [weak self] handle in
+        let logs = logs
+        let outputArchive = outputArchive
+        terminal.master.readabilityHandler = { handle in
             let data = handle.availableData
             guard !data.isEmpty else {
                 return
             }
 
-            DispatchQueue.main.async {
-                self?.recordOutput(data, for: project.id)
-            }
+            outputArchive.append(data, projectID: project.id)
+            logs.append(data)
         }
 
         process.terminationHandler = { [weak self] terminatedProcess in
@@ -497,6 +691,7 @@ final class RunnerManager: ObservableObject {
             terminal.slave.closeFile()
             processes[project.id] = nil
             terminals[project.id] = nil
+            _ = outputArchive.take(projectID: project.id)
             states[project.id] = .failed(error.localizedDescription)
         }
     }
@@ -582,21 +777,6 @@ final class RunnerManager: ObservableObject {
         }
     }
 
-    private func recordOutput(_ data: Data, for projectID: RunnerProject.ID) {
-        var projectData = capturedData[projectID] ?? Data()
-        projectData.append(data)
-        if projectData.count > 50_000 {
-            projectData.removeFirst(projectData.count - 50_000)
-        }
-        capturedData[projectID] = projectData
-
-        capturedTerminalData.append(data)
-        if capturedTerminalData.count > 200_000 {
-            capturedTerminalData.removeFirst(capturedTerminalData.count - 200_000)
-        }
-        capturedTerminalOutput = String(decoding: capturedTerminalData, as: UTF8.self)
-    }
-
     private func processDidTerminate(_ process: Process, projectID: RunnerProject.ID) {
         guard processes[projectID] === process else {
             return
@@ -608,11 +788,12 @@ final class RunnerManager: ObservableObject {
         terminals[projectID] = nil
         processes[projectID] = nil
         projectIDsByProcessIdentifier[process.processIdentifier] = nil
+        let capturedOutput = outputArchive.take(projectID: projectID)
 
         if stoppingProjects.remove(projectID) != nil || process.terminationStatus == 0 {
             states[projectID] = .stopped
         } else {
-            let output = capturedData[projectID].map {
+            let output = capturedOutput.map {
                 String(decoding: $0, as: UTF8.self)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
             }
@@ -620,7 +801,6 @@ final class RunnerManager: ObservableObject {
                 ?? "Amp exited with status \(process.terminationStatus)."
             states[projectID] = .failed(detail)
         }
-        capturedData[projectID] = nil
 
         refreshRunningRunners()
     }

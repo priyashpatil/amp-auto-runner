@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 enum RunnerTheme {
@@ -8,11 +9,7 @@ enum RunnerTheme {
 }
 
 struct RunnerLogsView: View {
-    private enum ScrollAnchor: Hashable {
-        case bottom
-    }
-
-    @ObservedObject var runners: RunnerManager
+    @ObservedObject var logs: RunnerLogStore
     @Binding var isPresented: Bool
     let fontSize: Double
 
@@ -46,129 +43,274 @@ struct RunnerLogsView: View {
     }
 
     private var terminal: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(spacing: 0) {
-                    Text(displayedOutput)
-                        .font(.system(size: fontSize, design: .monospaced))
-                        .lineSpacing(2)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
-                        .padding(12)
+        ZStack(alignment: .topLeading) {
+            TerminalTextView(snapshot: logs.snapshot, fontSize: fontSize)
 
-                    Color.clear
-                        .frame(height: 1)
-                        .id(ScrollAnchor.bottom)
-                }
+            if logs.snapshot.retainedOutput.isEmpty {
+                Text("Waiting for output from runners started by Amp Auto Runner…")
+                    .font(.system(size: fontSize, design: .monospaced))
+                    .foregroundStyle(Color.white.opacity(0.4))
+                    .padding(12)
+                    .allowsHitTesting(false)
             }
-            .defaultScrollAnchor(.bottom)
-            .onChange(of: runners.capturedTerminalOutput) {
-                proxy.scrollTo(ScrollAnchor.bottom, anchor: .bottom)
-            }
-            .background(RunnerTheme.terminalBackground)
         }
+        .background(RunnerTheme.terminalBackground)
+    }
+}
+
+struct TerminalTextView: NSViewRepresentable {
+    let snapshot: RunnerLogSnapshot
+    let fontSize: Double
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
     }
 
-    private var displayedOutput: AttributedString {
-        guard !runners.capturedTerminalOutput.isEmpty else {
-            var message = AttributedString(
-                "Waiting for output from runners started by Amp Auto Runner…"
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = true
+        scrollView.backgroundColor = Self.backgroundColor
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+
+        let textView = NSTextView(frame: scrollView.contentView.bounds)
+        textView.minSize = .zero
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = true
+        textView.drawsBackground = true
+        textView.backgroundColor = Self.backgroundColor
+        textView.textContainerInset = NSSize(width: 12, height: 12)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.textContainer?.containerSize = NSSize(
+            width: scrollView.contentSize.width,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.setAccessibilityLabel("Runner log output")
+
+        scrollView.documentView = textView
+        context.coordinator.attach(textView)
+        context.coordinator.apply(snapshot, fontSize: fontSize)
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        context.coordinator.apply(snapshot, fontSize: fontSize)
+    }
+
+    final class Coordinator {
+        private weak var textView: NSTextView?
+        private var parser = TerminalTextFormatter.Parser()
+        private var renderedRevision: UInt64?
+        private var renderedFontSize: Double?
+
+        func attach(_ textView: NSTextView) {
+            self.textView = textView
+        }
+
+        func apply(_ snapshot: RunnerLogSnapshot, fontSize: Double) {
+            guard
+                let textView,
+                let textStorage = textView.textStorage
+            else {
+                return
+            }
+
+            if renderedRevision == snapshot.revision, renderedFontSize == fontSize {
+                return
+            }
+
+            let canAppend = renderedFontSize == fontSize
+                && renderedRevision.map { $0 &+ 1 == snapshot.revision } == true
+
+            if canAppend {
+                let formatted = parser.nsAttributedString(
+                    for: snapshot.appendedOutput,
+                    fontSize: fontSize
+                )
+                textStorage.append(formatted)
+            } else {
+                parser = TerminalTextFormatter.Parser()
+                let formatted = parser.nsAttributedString(
+                    for: snapshot.retainedOutput,
+                    fontSize: fontSize
+                )
+                textStorage.setAttributedString(formatted)
+            }
+
+            trimRenderedHistory(textStorage)
+            renderedRevision = snapshot.revision
+            renderedFontSize = fontSize
+
+            if !snapshot.retainedOutput.isEmpty {
+                textView.scrollToEndOfDocument(nil)
+            }
+        }
+
+        private func trimRenderedHistory(_ textStorage: NSTextStorage) {
+            let overflow = textStorage.length - 200_000
+            guard overflow > 0 else {
+                return
+            }
+
+            let string = textStorage.string as NSString
+            let safeRange = string.rangeOfComposedCharacterSequences(
+                for: NSRange(location: 0, length: overflow)
             )
-            message.foregroundColor = Color.white.opacity(0.4)
-            return message
+            textStorage.deleteCharacters(in: safeRange)
         }
-
-        let output = runners.capturedTerminalOutput
-            .replacingOccurrences(of: "\r\n", with: "\n")
-        return TerminalTextFormatter.attributedString(for: output, fontSize: fontSize)
     }
+
+    private static let backgroundColor = NSColor(
+        calibratedRed: 0.025,
+        green: 0.028,
+        blue: 0.032,
+        alpha: 1
+    )
 }
 
 enum TerminalTextFormatter {
     private struct ANSIStyle {
-        var foregroundColor = Color.white.opacity(0.9)
+        var foregroundColor = NSColor(white: 0.9, alpha: 1)
         var isBold = false
         var isDim = false
+    }
+
+    struct Parser {
+        private var style = ANSIStyle()
+        private var pendingSequence = ""
+        private var pendingCarriageReturn = false
+
+        init() {}
+
+        mutating func nsAttributedString(
+            for text: String,
+            fontSize: Double = 12
+        ) -> NSAttributedString {
+            let result = NSMutableAttributedString()
+            let input = pendingSequence
+                + normalizedLineEndings(in: text)
+            pendingSequence = ""
+            var remaining = input[...]
+
+            while let escapeIndex = remaining.firstIndex(of: "\u{001B}") {
+                TerminalTextFormatter.append(
+                    remaining[..<escapeIndex],
+                    style: style,
+                    fontSize: fontSize,
+                    to: result
+                )
+
+                let introducerIndex = remaining.index(after: escapeIndex)
+                guard introducerIndex < remaining.endIndex else {
+                    pendingSequence = String(remaining[escapeIndex...])
+                    return result
+                }
+
+                switch remaining[introducerIndex] {
+                case "[":
+                    let sequenceStart = remaining.index(after: introducerIndex)
+                    let sequence = remaining[sequenceStart...]
+                    guard
+                        let terminator = sequence.firstIndex(
+                            where: TerminalTextFormatter.isANSITerminator
+                        )
+                    else {
+                        pendingSequence = String(remaining[escapeIndex...])
+                        return result
+                    }
+
+                    if sequence[terminator] == "m" {
+                        let codes = sequence[..<terminator]
+                            .split(separator: ";", omittingEmptySubsequences: false)
+                            .compactMap { $0.isEmpty ? 0 : Int($0) }
+                        TerminalTextFormatter.applySGRCodes(codes, to: &style)
+                    }
+
+                    remaining = sequence[sequence.index(after: terminator)...]
+                case "]":
+                    let sequenceStart = remaining.index(after: introducerIndex)
+                    guard
+                        let endIndex = TerminalTextFormatter.oscEndIndex(
+                            in: remaining[sequenceStart...]
+                        )
+                    else {
+                        pendingSequence = String(remaining[escapeIndex...])
+                        return result
+                    }
+                    remaining = remaining[endIndex...]
+                default:
+                    remaining = remaining[introducerIndex...]
+                }
+            }
+
+            TerminalTextFormatter.append(
+                remaining,
+                style: style,
+                fontSize: fontSize,
+                to: result
+            )
+            return result
+        }
+
+        private mutating func normalizedLineEndings(in text: String) -> String {
+            var input = pendingCarriageReturn ? "\r" + text : text
+            pendingCarriageReturn = input.last == "\r"
+            if pendingCarriageReturn {
+                input.removeLast()
+            }
+            return input.replacingOccurrences(of: "\r\n", with: "\n")
+        }
     }
 
     static func attributedString(
         for text: String,
         fontSize: Double = 12
     ) -> AttributedString {
-        ansiAttributedString(for: text, fontSize: fontSize)
-    }
-
-    private static func ansiAttributedString(
-        for text: String,
-        fontSize: Double
-    ) -> AttributedString {
-        var result = AttributedString()
-        var remaining = text[...]
-        var style = ANSIStyle()
-
-        while let escapeIndex = remaining.firstIndex(of: "\u{001B}") {
-            append(
-                remaining[..<escapeIndex],
-                style: style,
-                fontSize: fontSize,
-                to: &result
-            )
-
-            let introducerIndex = remaining.index(after: escapeIndex)
-            guard introducerIndex < remaining.endIndex else {
-                return result
-            }
-
-            switch remaining[introducerIndex] {
-            case "[":
-                let sequenceStart = remaining.index(after: introducerIndex)
-                let sequence = remaining[sequenceStart...]
-                guard let terminator = sequence.firstIndex(where: isANSITerminator) else {
-                    return result
-                }
-
-                if sequence[terminator] == "m" {
-                    let codes = sequence[..<terminator]
-                        .split(separator: ";", omittingEmptySubsequences: false)
-                        .compactMap { $0.isEmpty ? 0 : Int($0) }
-                    applySGRCodes(codes, to: &style)
-                }
-
-                remaining = sequence[sequence.index(after: terminator)...]
-            case "]":
-                let sequenceStart = remaining.index(after: introducerIndex)
-                guard let endIndex = oscEndIndex(in: remaining[sequenceStart...]) else {
-                    return result
-                }
-                remaining = remaining[endIndex...]
-            default:
-                remaining = remaining[introducerIndex...]
-            }
-        }
-
-        append(remaining, style: style, fontSize: fontSize, to: &result)
-        return result
+        var parser = Parser()
+        let formatted = parser.nsAttributedString(for: text, fontSize: fontSize)
+        return (try? AttributedString(formatted, including: \.appKit))
+            ?? AttributedString(formatted.string)
     }
 
     private static func append(
         _ text: Substring,
         style: ANSIStyle,
         fontSize: Double,
-        to result: inout AttributedString
+        to result: NSMutableAttributedString
     ) {
         guard !text.isEmpty else {
             return
         }
-        var fragment = AttributedString(String(text))
-        fragment.font = .system(
-            size: fontSize,
-            weight: style.isBold ? .bold : .regular,
-            design: .monospaced
-        )
-        fragment.foregroundColor = style.isDim
-            ? style.foregroundColor.opacity(0.5)
+
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineSpacing = 2
+        let color = style.isDim
+            ? style.foregroundColor.withAlphaComponent(0.5)
             : style.foregroundColor
-        result.append(fragment)
+        let font = NSFont.monospacedSystemFont(
+            ofSize: fontSize,
+            weight: style.isBold ? .bold : .regular
+        )
+        result.append(
+            NSAttributedString(
+                string: String(text),
+                attributes: [
+                    .font: font,
+                    .foregroundColor: color,
+                    .paragraphStyle: paragraphStyle,
+                ]
+            )
+        )
     }
 
     private static func applySGRCodes(_ codes: [Int], to style: inout ANSIStyle) {
@@ -246,7 +388,7 @@ enum TerminalTextFormatter {
         return stringTerminatorEnd
     }
 
-    private static func indexedColor(_ index: Int) -> Color {
+    private static func indexedColor(_ index: Int) -> NSColor {
         switch index {
         case 0...15:
             return terminalColor(at: index)
@@ -265,23 +407,23 @@ enum TerminalTextFormatter {
         }
     }
 
-    private static func terminalColor(at index: Int) -> Color {
+    private static func terminalColor(at index: Int) -> NSColor {
         switch index {
-        case 0: return Color(red: 0.15, green: 0.16, blue: 0.18)
-        case 1: return Color(red: 0.96, green: 0.27, blue: 0.32)
-        case 2: return Color(red: 0.28, green: 0.84, blue: 0.55)
-        case 3: return Color(red: 0.96, green: 0.76, blue: 0.32)
-        case 4: return Color(red: 0.35, green: 0.57, blue: 0.96)
-        case 5: return Color(red: 0.95, green: 0.35, blue: 0.74)
-        case 6: return Color(red: 0.20, green: 0.82, blue: 0.85)
-        case 7: return Color(red: 0.82, green: 0.84, blue: 0.88)
-        case 8: return Color(red: 0.38, green: 0.40, blue: 0.44)
-        case 9: return Color(red: 1.00, green: 0.39, blue: 0.43)
-        case 10: return Color(red: 0.38, green: 0.91, blue: 0.64)
-        case 11: return Color(red: 1.00, green: 0.84, blue: 0.42)
-        case 12: return Color(red: 0.45, green: 0.67, blue: 1.00)
-        case 13: return Color(red: 1.00, green: 0.43, blue: 0.80)
-        case 14: return Color(red: 0.35, green: 0.91, blue: 0.94)
+        case 0: return rgbColor(red: 38, green: 41, blue: 46)
+        case 1: return rgbColor(red: 245, green: 69, blue: 82)
+        case 2: return rgbColor(red: 71, green: 214, blue: 140)
+        case 3: return rgbColor(red: 245, green: 194, blue: 82)
+        case 4: return rgbColor(red: 89, green: 145, blue: 245)
+        case 5: return rgbColor(red: 242, green: 89, blue: 189)
+        case 6: return rgbColor(red: 51, green: 209, blue: 217)
+        case 7: return rgbColor(red: 209, green: 214, blue: 224)
+        case 8: return rgbColor(red: 97, green: 102, blue: 112)
+        case 9: return rgbColor(red: 255, green: 99, blue: 110)
+        case 10: return rgbColor(red: 97, green: 232, blue: 163)
+        case 11: return rgbColor(red: 255, green: 214, blue: 107)
+        case 12: return rgbColor(red: 115, green: 171, blue: 255)
+        case 13: return rgbColor(red: 255, green: 110, blue: 204)
+        case 14: return rgbColor(red: 89, green: 232, blue: 240)
         case 15: return .white
         default: return ANSIStyle().foregroundColor
         }
@@ -291,11 +433,12 @@ enum TerminalTextFormatter {
         component == 0 ? 0 : 55 + (component * 40)
     }
 
-    private static func rgbColor(red: Int, green: Int, blue: Int) -> Color {
-        Color(
-            red: Double(max(0, min(255, red))) / 255,
-            green: Double(max(0, min(255, green))) / 255,
-            blue: Double(max(0, min(255, blue))) / 255
+    private static func rgbColor(red: Int, green: Int, blue: Int) -> NSColor {
+        NSColor(
+            calibratedRed: CGFloat(max(0, min(255, red))) / 255,
+            green: CGFloat(max(0, min(255, green))) / 255,
+            blue: CGFloat(max(0, min(255, blue))) / 255,
+            alpha: 1
         )
     }
 }
