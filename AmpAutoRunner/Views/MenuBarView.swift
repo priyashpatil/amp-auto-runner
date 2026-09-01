@@ -8,6 +8,7 @@ struct RunnerDashboardView: View {
     @ObservedObject private var projects: ProjectStore
     @ObservedObject private var runners: RunnerManager
     @ObservedObject private var launchAtLogin: LaunchAtLoginController
+    @State private var hoveredRunnerID: RunnerTableRow.ID?
 
     init(model: AppModel) {
         self.model = model
@@ -122,7 +123,7 @@ struct RunnerDashboardView: View {
     }
 
     private func runnerTable(_ rows: [RunnerTableRow]) -> some View {
-        Table(rows) {
+        Table(of: RunnerTableRow.self, selection: hoverSelection) {
             TableColumn("") { row in
                 RunnerControl(row: row, model: model, runners: runners)
                     .frame(maxWidth: .infinity)
@@ -190,8 +191,26 @@ struct RunnerDashboardView: View {
                 }
             }
             .width(60)
+        } rows: {
+            ForEach(rows) { row in
+                TableRow(row)
+                    .onHover { isHovered in
+                        if isHovered {
+                            hoveredRunnerID = row.id
+                        } else if hoveredRunnerID == row.id {
+                            hoveredRunnerID = nil
+                        }
+                    }
+            }
         }
         .tableStyle(.inset(alternatesRowBackgrounds: true))
+    }
+
+    private var hoverSelection: Binding<RunnerTableRow.ID?> {
+        Binding(
+            get: { hoveredRunnerID },
+            set: { _ in }
+        )
     }
 
     private func chooseProject() {
