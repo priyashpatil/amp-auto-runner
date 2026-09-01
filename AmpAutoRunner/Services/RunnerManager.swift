@@ -113,6 +113,52 @@ private struct RunnerTerminal {
     let slave: FileHandle
 }
 
+enum RunnerEnvironment {
+    static func loginShellURL(inheritedEnvironment: [String: String]) -> URL {
+        var shellPaths: [String] = []
+        if let inheritedShell = inheritedEnvironment["SHELL"] {
+            shellPaths.append(inheritedShell)
+        }
+        if
+            let passwordEntry = getpwuid(getuid()),
+            let accountShell = passwordEntry.pointee.pw_shell
+        {
+            shellPaths.append(String(cString: accountShell))
+        }
+        shellPaths.append(contentsOf: ["/bin/zsh", "/bin/bash"])
+
+        return shellPaths
+            .map { URL(fileURLWithPath: $0) }
+            .first { FileManager.default.isExecutableFile(atPath: $0.path) }
+            ?? URL(fileURLWithPath: "/bin/sh")
+    }
+
+    static func executableSearchPath(
+        inheritedPath: String?,
+        homeDirectory: URL,
+        ampExecutableURL: URL
+    ) -> String {
+        var paths = inheritedPath?
+            .split(separator: ":")
+            .map(String.init) ?? []
+        let standardPaths = [
+            ampExecutableURL.deletingLastPathComponent().path,
+            homeDirectory.appendingPathComponent(".local/bin").path,
+            homeDirectory.appendingPathComponent("bin").path,
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/bin",
+            "/usr/local/sbin",
+            "/opt/local/bin",
+        ]
+
+        for path in standardPaths where !paths.contains(path) {
+            paths.append(path)
+        }
+        return paths.joined(separator: ":")
+    }
+}
+
 enum RunnerProcessScanner {
     static func scan() -> [RunningRunner] {
         guard let processList = commandOutput(
@@ -391,9 +437,15 @@ final class RunnerManager: ObservableObject {
             return
         }
 
+        var environment = ProcessInfo.processInfo.environment
+        let loginShellURL = RunnerEnvironment.loginShellURL(inheritedEnvironment: environment)
         let process = Process()
-        process.executableURL = ampExecutableURL
+        process.executableURL = loginShellURL
         process.arguments = [
+            "-l", "-i", "-c",
+            "export TERM=xterm-256color COLORTERM=truecolor FORCE_COLOR=3; unset NO_COLOR; exec \"$@\"",
+            loginShellURL.lastPathComponent,
+            ampExecutableURL.path,
             "--no-tui",
             "--runner-id", project.runnerID,
             "--remote-control-terminal",
@@ -403,11 +455,15 @@ final class RunnerManager: ObservableObject {
         process.standardError = terminal.slave
         process.standardInput = FileHandle.nullDevice
 
-        var environment = ProcessInfo.processInfo.environment
         environment["TERM"] = "xterm-256color"
         environment["COLORTERM"] = "truecolor"
         environment["FORCE_COLOR"] = "3"
         environment["NO_COLOR"] = nil
+        environment["PATH"] = RunnerEnvironment.executableSearchPath(
+            inheritedPath: environment["PATH"],
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser,
+            ampExecutableURL: ampExecutableURL
+        )
         process.environment = environment
 
         terminal.master.readabilityHandler = { [weak self] handle in
