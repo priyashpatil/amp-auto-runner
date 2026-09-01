@@ -57,6 +57,13 @@ private struct StatusBarMenu: View {
         } label: {
             Label("Show Runner Logs", systemImage: "terminal")
         }
+
+        Divider()
+
+        Button("Quit Amp Auto Runner") {
+            NSApplication.shared.terminate(nil)
+        }
+        .keyboardShortcut("q")
     }
 
     private func showWindow(id: String) {

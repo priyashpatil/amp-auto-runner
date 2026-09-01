@@ -123,6 +123,12 @@ struct RunnerDashboardView: View {
 
     private func runnerTable(_ rows: [RunnerTableRow]) -> some View {
         Table(rows) {
+            TableColumn("") { row in
+                RunnerControl(row: row, model: model, runners: runners)
+                    .frame(maxWidth: .infinity)
+            }
+            .width(28)
+
             TableColumn("Project") { row in
                 HStack(spacing: 7) {
                     Image(systemName: row.project == nil ? "terminal" : "folder.fill")
@@ -159,7 +165,7 @@ struct RunnerDashboardView: View {
             }
             .width(100)
 
-            TableColumn("Start Automatically") { row in
+            TableColumn("Auto Run") { row in
                 HStack {
                     Spacer(minLength: 0)
                     Toggle("Start Automatically", isOn: autoStartBinding(for: row))
@@ -171,12 +177,19 @@ struct RunnerDashboardView: View {
                     Spacer(minLength: 0)
                 }
             }
-            .width(125)
+            .width(72)
 
             TableColumn("") { row in
-                RunnerActions(row: row, model: model, runners: runners)
+                if let project = row.project {
+                    Button("Remove") {
+                        model.remove(project)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Remove runner")
+                    .frame(maxWidth: .infinity)
+                }
             }
-            .width(70)
+            .width(60)
         }
         .tableStyle(.inset(alternatesRowBackgrounds: true))
     }
@@ -398,29 +411,13 @@ private struct RunnerIDEditor: View {
     }
 }
 
-private struct RunnerActions: View {
+private struct RunnerControl: View {
     let row: RunnerTableRow
     let model: AppModel
     let runners: RunnerManager
 
-    var body: some View {
-        HStack(spacing: 3) {
-            runnerAction
-
-            if let project = row.project {
-                Button(role: .destructive) {
-                    model.remove(project)
-                } label: {
-                    Image(systemName: "trash")
-                }
-                .buttonStyle(.borderless)
-                .help("Remove saved runner")
-            }
-        }
-    }
-
     @ViewBuilder
-    private var runnerAction: some View {
+    var body: some View {
         if let runner = row.runner, runners.isOwned(runner) {
             Button {
                 model.stop(runner)
