@@ -143,6 +143,32 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertEqual(store.projects.first?.runnerID, "existing-runner")
     }
 
+    func testEnablingAutoStartDoesNotStartAStoppedRunner() throws {
+        let suiteName = "ProjectStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let store = ProjectStore(defaults: defaults)
+        let runners = RunnerManager()
+        let model = AppModel(
+            projects: store,
+            runners: runners,
+            launchAtLogin: LaunchAtLoginController()
+        )
+        let project = store.add(
+            directoryURL: URL(
+                fileURLWithPath: "/tmp/missing-project-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        )
+        store.setStartsAutomatically(false, for: project.id)
+
+        model.setAutoStarts(true, for: project)
+
+        XCTAssertTrue(store.projects.first?.startsAutomatically == true)
+        XCTAssertEqual(runners.state(for: project), .stopped)
+    }
+
     func testAdoptingAvailableRunnerMigratesItsProcessIntoTheApp() async throws {
         let suiteName = "ProjectStoreTests-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
