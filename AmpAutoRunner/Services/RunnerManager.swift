@@ -390,16 +390,19 @@ enum RunnerProcessScanner {
             guard
                 let executable = arguments.first,
                 executable.split(separator: "/").last == "amp",
-                arguments.contains("--no-tui"),
-                let runnerID = runnerID(in: arguments)
+                arguments.contains("--no-tui")
             else {
                 return nil
             }
 
+            let path = workingDirectories[processIdentifier].map(normalizedPath)
+            let runnerID = runnerID(in: arguments)
+                ?? inferredRunnerID(processIdentifier: processIdentifier, path: path)
+
             return RunningRunner(
                 processIdentifier: processIdentifier,
                 runnerID: runnerID,
-                path: workingDirectories[processIdentifier].map(normalizedPath),
+                path: path,
                 command: command
             )
         }
@@ -442,6 +445,19 @@ enum RunnerProcessScanner {
         }
 
         return nil
+    }
+
+    private static func inferredRunnerID(processIdentifier: Int32, path: String?) -> String {
+        if
+            let path,
+            let runnerID = RunnerProject.normalizedRunnerID(
+                URL(fileURLWithPath: path, isDirectory: true).lastPathComponent
+            )
+        {
+            return runnerID
+        }
+
+        return "amp-runner-\(processIdentifier)"
     }
 
     private static func cleanArgument(_ argument: Substring) -> String {

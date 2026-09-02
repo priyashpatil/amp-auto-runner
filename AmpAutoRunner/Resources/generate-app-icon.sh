@@ -4,11 +4,9 @@ set -euo pipefail
 
 source_icon="$1"
 output_icon="$2"
-icon_work="$(mktemp -d "${DERIVED_FILE_DIR}/AmpAutoRunner.icon.XXXXXX")"
-trap 'rm -rf "$icon_work"' EXIT
-
-iconset="$icon_work/AmpAutoRunner.iconset"
+iconset="$(dirname "${SCRIPT_OUTPUT_FILE_1}")"
 mkdir -p "$iconset" "$(dirname "$output_icon")"
+rm -f "$iconset"/*.png "$output_icon"
 
 for size in 16 32 128 256 512; do
     sips -s format png -z "$size" "$size" "$source_icon" \
