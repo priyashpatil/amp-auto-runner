@@ -65,9 +65,6 @@ final class AppModel: ObservableObject {
 
     func setAutoStarts(_ autoStarts: Bool, for project: RunnerProject) {
         projects.setStartsAutomatically(autoStarts, for: project.id)
-        if autoStarts {
-            migrateOrStart(project)
-        }
     }
 
     func autoStarts(_ runner: RunningRunner) -> Bool {
