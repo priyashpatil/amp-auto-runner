@@ -39,18 +39,26 @@ final class RunnerProjectTests: XCTestCase {
           1747 amp --runner-id=dotfiles --no-tui --remote-control-terminal
           2000 /bin/zsh -c amp --no-tui --runner-id not-a-process
           2001 /Users/example/.local/bin/amp --no-tui
+          2002 amp --no-tui
         """
 
         let runners = RunnerProcessScanner.parseProcessList(
             processList,
-            workingDirectories: [1746: "/tmp/beacon", 1747: "/tmp/dotfiles"]
+            workingDirectories: [
+                1746: "/tmp/beacon",
+                1747: "/tmp/dotfiles",
+                2001: "/tmp/Example Project",
+            ]
         )
 
-        XCTAssertEqual(runners.count, 2)
+        XCTAssertEqual(runners.count, 4)
         XCTAssertEqual(runners[0].processIdentifier, 1746)
         XCTAssertEqual(runners[0].runnerID, "beacon")
         XCTAssertEqual(runners[0].path, "/tmp/beacon")
         XCTAssertEqual(runners[1].runnerID, "dotfiles")
+        XCTAssertEqual(runners[2].runnerID, "example-project")
+        XCTAssertEqual(runners[2].path, "/tmp/Example Project")
+        XCTAssertEqual(runners[3].runnerID, "amp-runner-2002")
     }
 
     func testProcessScannerParsesWorkingDirectoriesFromLsofFields() {

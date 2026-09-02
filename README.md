@@ -18,8 +18,11 @@ a stable runner ID, enables Auto Start, and launches its runner immediately.
 It also discovers compatible runners that were started manually:
 
 ```sh
-amp --no-tui --runner-id <project-runner-id> --remote-control-terminal
+amp --no-tui
 ```
+
+An explicit `--runner-id` is optional. When it is omitted, the app uses the
+runner's working-directory name as its initial editable ID.
 
 ## Current features
 
