@@ -18,6 +18,11 @@ directory and never operates on the production bundle or bundle identifier.
   `com.priyashpatil.AmpAutoRunner.debug` as Debug-only.
 - Do not build or launch Release unless the user explicitly requests a Release
   build. Normal development needs only Debug.
+- Never use `launchctl submit` for a one-shot build, install, or relaunch. A
+  submitted job may be restarted after it exits and create an app restart loop.
+- When the user explicitly requests a production install, follow the README
+  installation commands directly. Do not invent a background mechanism to
+  preserve the current agent session; allow the managed runner to disconnect.
 - Restarting Debug is allowed when the user asks to build and start/run the app.
   Never infer permission to restart production.
 - After starting Debug, report both process paths so the distinction is visible.
