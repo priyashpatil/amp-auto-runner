@@ -4,11 +4,11 @@ import XCTest
 
 @MainActor
 final class ProjectStoreTests: XCTestCase {
-    func testRunnerListAndLogsCannotBothBeHidden() {
+    func testRunnerListAndLogsAreShownInitiallyAndCannotBothBeHidden() {
         let model = AppModel()
 
         XCTAssertTrue(model.showsRunnerList)
-        XCTAssertFalse(model.showsRunnerLogs)
+        XCTAssertTrue(model.showsRunnerLogs)
 
         model.setRunnerListVisible(false)
 
