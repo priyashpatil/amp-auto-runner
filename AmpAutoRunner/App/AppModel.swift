@@ -8,7 +8,7 @@ final class AppModel: ObservableObject {
     let launchAtLogin: LaunchAtLoginController
 
     @Published private(set) var showsRunnerList = true
-    @Published private(set) var showsRunnerLogs = false
+    @Published private(set) var showsRunnerLogs = true
 
     private var didStartMonitoring = false
     private var didAutoStartProjects = false
