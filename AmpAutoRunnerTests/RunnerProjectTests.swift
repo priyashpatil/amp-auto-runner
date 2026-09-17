@@ -81,7 +81,8 @@ final class RunnerProjectTests: XCTestCase {
 
     func testRunnerDirectoryListParserPreservesSpacesAndExpandsHome() {
         let output = """
-        Runner test-runner serves 3 directories:
+        Runner test-runner serves 4 directories:
+          /tmp/runner-root
           ~/code/project one
           /tmp/project two
           ~/code/rift (git@github.com:example/rift.git)
@@ -90,13 +91,49 @@ final class RunnerProjectTests: XCTestCase {
         XCTAssertEqual(
             RunnerManager.parseServedDirectoryPaths(
                 output,
-                homeDirectory: URL(fileURLWithPath: "/Users/example", isDirectory: true)
+                homeDirectory: URL(fileURLWithPath: "/Users/example", isDirectory: true),
+                excluding: ["/tmp/runner-root"]
             ),
             [
                 "/Users/example/code/project one",
                 "/tmp/project two",
                 "/Users/example/code/rift",
             ]
+        )
+    }
+
+    @MainActor
+    func testStartedRunnerAttachesProjectsThroughDirectoryCommand() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let runnerRoot = temporaryDirectory.appendingPathComponent("runner-root", isDirectory: true)
+        let project = temporaryDirectory.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let directoryAdded = expectation(description: "Project attached through the CLI")
+        let lock = NSLock()
+        var addArguments: [String] = []
+        let manager = RunnerManager(
+            runnerID: "test-runner",
+            ampExecutableURL: URL(fileURLWithPath: "/usr/bin/true"),
+            directoryCommandExecutor: RunnerDirectoryCommandExecutor { _, arguments in
+                lock.withLock {
+                    addArguments = arguments
+                }
+                directoryAdded.fulfill()
+                return .success("")
+            },
+            runnerRootDirectoryURL: runnerRoot
+        )
+        defer { manager.stopAll() }
+
+        manager.start(directories: [project])
+
+        await fulfillment(of: [directoryAdded], timeout: 2)
+        XCTAssertEqual(
+            lock.withLock { addArguments },
+            ["runner", "dirs", "add", project.path, "--runner-id", "test-runner"]
         )
     }
 

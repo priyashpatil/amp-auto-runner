@@ -491,16 +491,32 @@ final class RunnerManager: ObservableObject {
     private let directoryQueue = DispatchQueue(label: "AmpAutoRunner.runner-directories", qos: .utility)
     private let ampExecutableURLOverride: URL?
     private let directoryCommandExecutor: RunnerDirectoryCommandExecutor
+    private let runnerRootDirectoryURL: URL
     private var refreshingDirectoriesProcessIdentifier: Int32?
+    private var isAttachingInitialDirectories = false
 
     init(
         runnerID: String? = nil,
         ampExecutableURL: URL? = nil,
-        directoryCommandExecutor: RunnerDirectoryCommandExecutor = .live
+        directoryCommandExecutor: RunnerDirectoryCommandExecutor = .live,
+        runnerRootDirectoryURL: URL? = nil
     ) {
         self.runnerID = runnerID ?? RunnerManager.defaultRunnerID
         ampExecutableURLOverride = ampExecutableURL
         self.directoryCommandExecutor = directoryCommandExecutor
+        self.runnerRootDirectoryURL = runnerRootDirectoryURL
+            ?? Self.defaultRunnerRootDirectoryURL
+    }
+
+    private static var defaultRunnerRootDirectoryURL: URL {
+        let applicationSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? FileManager.default.homeDirectoryForCurrentUser
+        let bundleIdentifier = Bundle.main.bundleIdentifier ?? "com.priyashpatil.AmpAutoRunner"
+        return applicationSupport
+            .appendingPathComponent(bundleIdentifier, isDirectory: true)
+            .appendingPathComponent("Runner Root", isDirectory: true)
     }
 
     static var defaultRunnerID: String {
@@ -593,7 +609,10 @@ final class RunnerManager: ObservableObject {
             }
         }
 
-        if let matchingRunner = discoveredRunners.first(where: { $0.runnerID == runnerID }) {
+        if
+            !isAttachingInitialDirectories,
+            let matchingRunner = discoveredRunners.first(where: { $0.runnerID == runnerID })
+        {
             if matchingRunner.processIdentifier != refreshingDirectoriesProcessIdentifier {
                 refreshingDirectoriesProcessIdentifier = matchingRunner.processIdentifier
                 refreshServedDirectories(processIdentifier: matchingRunner.processIdentifier)
@@ -641,6 +660,15 @@ final class RunnerManager: ObservableObject {
             fail("Amp CLI was not found. Install Amp in ~/.local/bin or a standard Homebrew location.")
             return
         }
+        do {
+            try FileManager.default.createDirectory(
+                at: runnerRootDirectoryURL,
+                withIntermediateDirectories: true
+            )
+        } catch {
+            fail("Could not prepare the shared runner: \(error.localizedDescription)")
+            return
+        }
 
         errorMessage = nil
         state = .starting
@@ -656,7 +684,7 @@ final class RunnerManager: ObservableObject {
         let loginShellURL = RunnerEnvironment.loginShellURL(inheritedEnvironment: environment)
         let process = Process()
         process.executableURL = loginShellURL
-        var arguments = [
+        let arguments = [
             "-l", "-i", "-c",
             "export TERM=xterm-256color COLORTERM=truecolor FORCE_COLOR=3; unset NO_COLOR; exec \"$@\"",
             loginShellURL.lastPathComponent,
@@ -665,11 +693,8 @@ final class RunnerManager: ObservableObject {
             "--runner-id", runnerID,
             "--remote-control-terminal",
         ]
-        for directory in directories {
-            arguments.append(contentsOf: ["--dir", directory.path])
-        }
         process.arguments = arguments
-        process.currentDirectoryURL = directories[0]
+        process.currentDirectoryURL = runnerRootDirectoryURL
         process.standardOutput = terminal.slave
         process.standardError = terminal.slave
         process.standardInput = FileHandle.nullDevice
@@ -708,10 +733,16 @@ final class RunnerManager: ObservableObject {
         self.terminal = terminal
 
         do {
+            isAttachingInitialDirectories = true
             try process.run()
-            state = .running
+            attachInitialDirectories(
+                directories,
+                executableURL: ampExecutableURL,
+                process: process
+            )
             refreshRunningRunners()
         } catch {
+            isAttachingInitialDirectories = false
             terminal.master.readabilityHandler = nil
             terminal.master.closeFile()
             terminal.slave.closeFile()
@@ -770,6 +801,7 @@ final class RunnerManager: ObservableObject {
             return
         }
 
+        isAttachingInitialDirectories = false
         terminal?.master.readabilityHandler = nil
         terminal?.master.closeFile()
         terminal?.slave.closeFile()
@@ -791,6 +823,50 @@ final class RunnerManager: ObservableObject {
 
         isStopping = false
         refreshRunningRunners()
+    }
+
+    private func attachInitialDirectories(
+        _ directories: [URL],
+        executableURL: URL,
+        process launchedProcess: Process
+    ) {
+        let runnerID = runnerID
+        let executor = directoryCommandExecutor
+        directoryQueue.async { [weak self] in
+            var failure: String?
+            for directory in directories {
+                var result: RunnerDirectoryCommandResult = .failure("")
+                for _ in 0..<20 {
+                    result = executor.execute(
+                        executableURL,
+                        ["runner", "dirs", "add", directory.path, "--runner-id", runnerID]
+                    )
+                    guard
+                        case let .failure(detail) = result,
+                        detail.contains("No running runner is listening")
+                    else {
+                        break
+                    }
+                    Thread.sleep(forTimeInterval: 0.1)
+                }
+                if case let .failure(detail) = result {
+                    failure = detail.isEmpty ? "Could not attach served directories." : detail
+                    break
+                }
+            }
+
+            DispatchQueue.main.async {
+                guard let self, self.process === launchedProcess else {
+                    return
+                }
+                self.isAttachingInitialDirectories = false
+                self.state = .running
+                if let failure {
+                    self.reportCommandFailure(failure)
+                }
+                self.refreshRunningRunners()
+            }
+        }
     }
 
     private func updateDirectory(
@@ -838,6 +914,7 @@ final class RunnerManager: ObservableObject {
         errorMessage = nil
         let runnerID = runnerID
         let executor = directoryCommandExecutor
+        let excludedDirectoryPaths = [Self.normalizedPath(runnerRootDirectoryURL)]
         directoryQueue.async { [weak self] in
             guard let self else {
                 return
@@ -874,7 +951,10 @@ final class RunnerManager: ObservableObject {
                 return
             }
 
-            let actualDirectoryPaths = Self.parseServedDirectoryPaths(output)
+            let actualDirectoryPaths = Self.parseServedDirectoryPaths(
+                output,
+                excluding: Set(excludedDirectoryPaths)
+            )
             DispatchQueue.main.async {
                 guard self.refreshingDirectoriesProcessIdentifier == processIdentifier else {
                     return
@@ -887,7 +967,8 @@ final class RunnerManager: ObservableObject {
 
     nonisolated static func parseServedDirectoryPaths(
         _ output: String,
-        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        excluding excludedDirectoryPaths: Set<String> = []
     ) -> Set<String> {
         Set(output.split(separator: "\n").compactMap { line in
             guard line.first?.isWhitespace == true else {
@@ -904,7 +985,8 @@ final class RunnerManager: ObservableObject {
             guard path.hasPrefix("/") else {
                 return nil
             }
-            return normalizedPath(URL(fileURLWithPath: path, isDirectory: true))
+            let normalizedPath = normalizedPath(URL(fileURLWithPath: path, isDirectory: true))
+            return excludedDirectoryPaths.contains(normalizedPath) ? nil : normalizedPath
         })
     }
 
