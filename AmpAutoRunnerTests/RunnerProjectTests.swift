@@ -16,6 +16,17 @@ final class RunnerProjectTests: XCTestCase {
         XCTAssertFalse(project.isServed)
     }
 
+    func testNewServedSettingTakesPrecedenceOverLegacyAutoStart() throws {
+        let id = UUID(uuidString: "01234567-89AB-CDEF-0123-456789ABCDEF")!
+        let data = Data("""
+        {"id":"\(id.uuidString)","path":"/tmp/example","isServed":false,"startsAutomatically":true}
+        """.utf8)
+
+        let project = try JSONDecoder().decode(RunnerProject.self, from: data)
+
+        XCTAssertFalse(project.isServed)
+    }
+
     @MainActor
     func testRunnerUsesOneStableHostnameSafeID() {
         let manager = RunnerManager(runnerID: "test-mac-auto-runner")
@@ -66,6 +77,180 @@ final class RunnerProjectTests: XCTestCase {
             RunnerProcessScanner.parseWorkingDirectories(output),
             [1746: "/tmp/beacon", 1747: "/tmp/dotfiles"]
         )
+    }
+
+    func testRunnerDirectoryListParserPreservesSpacesAndExpandsHome() {
+        let output = """
+        Runner test-runner serves 2 directories:
+          ~/code/project one
+          /tmp/project two
+        """
+
+        XCTAssertEqual(
+            RunnerManager.parseServedDirectoryPaths(
+                output,
+                homeDirectory: URL(fileURLWithPath: "/Users/example", isDirectory: true)
+            ),
+            ["/Users/example/code/project one", "/tmp/project two"]
+        )
+    }
+
+    @MainActor
+    func testReconciliationWaitsForPendingDirectoryAdd() async throws {
+        let anchorPath = "/tmp/anchor-project"
+        let addedPath = "/tmp/added-project"
+        let addStarted = expectation(description: "Directory add started")
+        let addCompleted = expectation(description: "Directory add completed")
+        let initialReconciliationCompleted = expectation(
+            description: "Initial reconciliation completed"
+        )
+        let overlappingReconciliationCompleted = expectation(
+            description: "Overlapping reconciliation completed"
+        )
+        let allowAddToFinish = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var actualPaths: Set<String> = [anchorPath]
+        var removedAddedDirectory = false
+        var listCount = 0
+        let manager = RunnerManager(
+            runnerID: "test-runner",
+            ampExecutableURL: URL(fileURLWithPath: "/usr/bin/true"),
+            directoryCommandExecutor: RunnerDirectoryCommandExecutor { _, arguments in
+                lock.lock()
+                defer { lock.unlock() }
+                if arguments.contains("list") {
+                    listCount += 1
+                    if listCount == 1 {
+                        initialReconciliationCompleted.fulfill()
+                    } else {
+                        overlappingReconciliationCompleted.fulfill()
+                    }
+                    let paths = actualPaths.sorted().map { "  \($0)" }.joined(separator: "\n")
+                    return .success("Runner test-runner serves \(actualPaths.count) directories:\n\(paths)")
+                }
+                if arguments.contains("add"), arguments.contains(addedPath) {
+                    lock.unlock()
+                    addStarted.fulfill()
+                    allowAddToFinish.wait()
+                    lock.lock()
+                    actualPaths.insert(addedPath)
+                    return .success("")
+                }
+                if arguments.contains("remove"), arguments.contains(addedPath) {
+                    removedAddedDirectory = true
+                    actualPaths.remove(addedPath)
+                    return .success("")
+                }
+                return .failure("Unexpected command: \(arguments)")
+            }
+        )
+        let firstRunner = RunningRunner(
+            processIdentifier: 1234,
+            runnerID: manager.runnerID,
+            path: anchorPath,
+            command: "amp --no-tui --runner-id test-runner"
+        )
+        manager.applyScanResult([firstRunner])
+        manager.start(directories: [URL(fileURLWithPath: anchorPath, isDirectory: true)])
+        await fulfillment(of: [initialReconciliationCompleted], timeout: 2)
+
+        manager.addDirectory(URL(fileURLWithPath: addedPath, isDirectory: true)) { succeeded in
+            XCTAssertTrue(succeeded)
+            addCompleted.fulfill()
+        }
+        await fulfillment(of: [addStarted], timeout: 2)
+        manager.applyScanResult([
+            RunningRunner(
+                processIdentifier: 5678,
+                runnerID: manager.runnerID,
+                path: anchorPath,
+                command: "amp --no-tui --runner-id test-runner"
+            ),
+        ])
+        allowAddToFinish.signal()
+
+        await fulfillment(of: [addCompleted, overlappingReconciliationCompleted], timeout: 2)
+        let (finalPaths, didRemoveAddedDirectory) = lock.withLock {
+            (actualPaths, removedAddedDirectory)
+        }
+
+        XCTAssertEqual(finalPaths, [anchorPath, addedPath])
+        XCTAssertFalse(didRemoveAddedDirectory)
+    }
+
+    @MainActor
+    func testFailedReconciliationRetriesForTheSameRunnerProcess() async throws {
+        let desiredPath = "/tmp/desired-project"
+        let firstAttempt = expectation(description: "First reconciliation attempted")
+        let secondAttempt = expectation(description: "Reconciliation retried")
+        let lock = NSLock()
+        var listAttemptCount = 0
+        let manager = RunnerManager(
+            runnerID: "test-runner",
+            ampExecutableURL: URL(fileURLWithPath: "/usr/bin/true"),
+            directoryCommandExecutor: RunnerDirectoryCommandExecutor { _, arguments in
+                guard arguments.contains("list") else {
+                    return .failure("Unexpected command: \(arguments)")
+                }
+                lock.lock()
+                listAttemptCount += 1
+                let attempt = listAttemptCount
+                lock.unlock()
+                if attempt == 1 {
+                    firstAttempt.fulfill()
+                    return .failure("Temporary failure")
+                }
+                secondAttempt.fulfill()
+                return .success("Runner test-runner serves 1 directory:\n  \(desiredPath)")
+            }
+        )
+        let runningRunner = RunningRunner(
+            processIdentifier: 1234,
+            runnerID: manager.runnerID,
+            path: desiredPath,
+            command: "amp --no-tui --runner-id test-runner"
+        )
+        manager.applyScanResult([runningRunner])
+        manager.start(directories: [URL(fileURLWithPath: desiredPath, isDirectory: true)])
+
+        await fulfillment(of: [firstAttempt], timeout: 2)
+        for _ in 0..<20 where manager.errorMessage == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        manager.applyScanResult([runningRunner])
+
+        await fulfillment(of: [secondAttempt], timeout: 2)
+        XCTAssertEqual(listAttemptCount, 2)
+    }
+
+    @MainActor
+    func testDiscoveredRunnerBecomesStoppedAfterItDisappears() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        process.arguments = ["30"]
+        try process.run()
+        defer {
+            if process.isRunning {
+                process.terminate()
+            }
+            process.waitUntilExit()
+        }
+        let manager = RunnerManager(runnerID: "test-runner")
+        manager.applyScanResult([
+            RunningRunner(
+                processIdentifier: process.processIdentifier,
+                runnerID: manager.runnerID,
+                path: "/tmp",
+                command: "amp --no-tui --runner-id test-runner"
+            ),
+        ])
+
+        manager.stop()
+        process.waitUntilExit()
+        manager.applyScanResult([])
+
+        XCTAssertEqual(manager.state, .stopped)
+        XCTAssertFalse(manager.isRunning)
     }
 
     func testRunnerEnvironmentAddsExecutableLocationsMissingFromGUIPath() {

@@ -35,6 +35,11 @@ struct RunnerDashboardView: View {
                 Divider()
             }
 
+            if let errorMessage = runners.errorMessage {
+                runnerErrorNotice(errorMessage)
+                Divider()
+            }
+
             GeometryReader { geometry in
                 if model.showsRunnerLogs {
                     splitLayout(in: geometry.size)
@@ -331,6 +336,36 @@ struct RunnerDashboardView: View {
         return "Launch at Login is off. The runner won’t resume after your next login."
     }
 
+    private func runnerErrorNotice(_ message: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.octagon.fill")
+                .foregroundStyle(.red)
+                .accessibilityHidden(true)
+
+            Text(message)
+                .font(
+                    .system(
+                        size: max(10, interfaceFontSize - 2),
+                        design: .monospaced
+                    )
+                )
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+                .help(message)
+
+            Spacer(minLength: 8)
+
+            Button("Dismiss") {
+                runners.clearError()
+            }
+        }
+        .controlSize(.small)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity)
+        .background(Color.red.opacity(0.08))
+    }
+
     private var runnerLogsBinding: Binding<Bool> {
         Binding(
             get: { model.showsRunnerLogs },
@@ -408,6 +443,7 @@ struct RunnerDashboardView: View {
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .controlSize(.mini)
+                        .disabled(model.pendingProjectIDs.contains(row.project.id))
                         .help("Make this directory available through the shared runner")
                     Spacer(minLength: 0)
                 }
@@ -421,6 +457,7 @@ struct RunnerDashboardView: View {
                     Image(systemName: "minus.circle")
                 }
                 .buttonStyle(.borderless)
+                .disabled(model.pendingProjectIDs.contains(row.project.id))
                 .accessibilityLabel("Remove directory")
                 .help("Remove directory")
                 .frame(maxWidth: .infinity)

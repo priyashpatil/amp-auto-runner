@@ -64,6 +64,261 @@ final class ProjectStoreTests: XCTestCase {
         }
     }
 
+    func testInitialScanStartsSavedServedDirectories() throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = ProjectStore(defaults: defaults)
+        store.add(
+            directoryURL: URL(
+                fileURLWithPath: "/tmp/missing-project-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        )
+        let runners = RunnerManager(runnerID: "test-runner")
+        let model = AppModel(
+            projects: store,
+            runners: runners,
+            launchAtLogin: LaunchAtLoginController()
+        )
+
+        runners.applyScanResult([])
+
+        guard case .failed = runners.state else {
+            return XCTFail("The initial scan should start saved served directories")
+        }
+        withExtendedLifetime(model) {}
+    }
+
+    func testInitialScanAdoptsMatchingRunnerWithoutLaunchingAnotherProcess() throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = ProjectStore(defaults: defaults)
+        let directory = URL(fileURLWithPath: "/tmp/example project", isDirectory: true)
+        store.add(directoryURL: directory)
+        let runners = RunnerManager(
+            runnerID: "test-runner",
+            ampExecutableURL: URL(fileURLWithPath: "/usr/bin/true"),
+            directoryCommandExecutor: RunnerDirectoryCommandExecutor { _, arguments in
+                if arguments.contains("list") {
+                    return .success("Runner test-runner serves 1 directory:\n  \(directory.path)")
+                }
+                return .failure("Unexpected command")
+            }
+        )
+        let model = AppModel(
+            projects: store,
+            runners: runners,
+            launchAtLogin: LaunchAtLoginController()
+        )
+
+        runners.applyScanResult([
+            RunningRunner(
+                processIdentifier: 1234,
+                runnerID: runners.runnerID,
+                path: directory.path,
+                command: "amp --no-tui --runner-id test-runner"
+            ),
+        ])
+
+        XCTAssertEqual(runners.state, .running)
+        XCTAssertTrue(runners.isRunning)
+        withExtendedLifetime(model) {}
+    }
+
+    func testFailedLiveRemovalKeepsProjectServedAndReportsTheError() async throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = ProjectStore(defaults: defaults)
+        let project = store.add(
+            directoryURL: URL(fileURLWithPath: "/tmp/example-project", isDirectory: true)
+        )
+        let removalAttempted = expectation(description: "Removal attempted")
+        let runners = RunnerManager(
+            runnerID: "test-runner",
+            ampExecutableURL: URL(fileURLWithPath: "/usr/bin/true"),
+            directoryCommandExecutor: RunnerDirectoryCommandExecutor { _, arguments in
+                if arguments.contains("list") {
+                    return .success("Runner test-runner serves 1 directory:\n  \(project.path)")
+                }
+                if arguments.contains("remove") {
+                    removalAttempted.fulfill()
+                    return .failure("Permission denied")
+                }
+                return .failure("Unexpected command")
+            }
+        )
+        runners.applyScanResult([
+            RunningRunner(
+                processIdentifier: 1234,
+                runnerID: runners.runnerID,
+                path: project.path,
+                command: "amp --no-tui --runner-id test-runner"
+            ),
+        ])
+        let model = AppModel(
+            projects: store,
+            runners: runners,
+            launchAtLogin: LaunchAtLoginController()
+        )
+
+        model.setIsServed(false, for: project)
+        await fulfillment(of: [removalAttempted], timeout: 2)
+        try await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertTrue(try XCTUnwrap(store.projects.first).isServed)
+        XCTAssertEqual(runners.errorMessage, "Permission denied")
+    }
+
+    func testProjectCannotBeRemovedWhileItsDirectoryIsBeingAdded() async throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = ProjectStore(defaults: defaults)
+        let addStarted = expectation(description: "Directory add started")
+        let allowAddToFinish = DispatchSemaphore(value: 0)
+        let runners = RunnerManager(
+            runnerID: "test-runner",
+            ampExecutableURL: URL(fileURLWithPath: "/usr/bin/true"),
+            directoryCommandExecutor: RunnerDirectoryCommandExecutor { _, arguments in
+                guard arguments.contains("add") else {
+                    return .failure("Unexpected command: \(arguments)")
+                }
+                addStarted.fulfill()
+                allowAddToFinish.wait()
+                return .success("")
+            }
+        )
+        runners.applyScanResult([
+            RunningRunner(
+                processIdentifier: 1234,
+                runnerID: runners.runnerID,
+                path: "/tmp",
+                command: "amp --no-tui --runner-id test-runner"
+            ),
+        ])
+        let model = AppModel(
+            projects: store,
+            runners: runners,
+            launchAtLogin: LaunchAtLoginController()
+        )
+        let project = model.addProject(
+            directoryURL: URL(fileURLWithPath: "/tmp/new-project", isDirectory: true)
+        )
+
+        await fulfillment(of: [addStarted], timeout: 2)
+        model.remove(project)
+
+        XCTAssertEqual(store.projects.map(\.id), [project.id])
+        XCTAssertTrue(model.pendingProjectIDs.contains(project.id))
+
+        allowAddToFinish.signal()
+        for _ in 0..<20 where model.pendingProjectIDs.contains(project.id) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertEqual(store.projects.map(\.id), [project.id])
+        XCTAssertTrue(try XCTUnwrap(store.projects.first).isServed)
+        XCTAssertFalse(model.pendingProjectIDs.contains(project.id))
+    }
+
+    func testDuplicateProjectAddDoesNotBypassPendingOperation() async throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = ProjectStore(defaults: defaults)
+        let addStarted = expectation(description: "Directory add started once")
+        addStarted.assertForOverFulfill = true
+        let allowAddToFinish = DispatchSemaphore(value: 0)
+        let runners = RunnerManager(
+            runnerID: "test-runner",
+            ampExecutableURL: URL(fileURLWithPath: "/usr/bin/true"),
+            directoryCommandExecutor: RunnerDirectoryCommandExecutor { _, arguments in
+                guard arguments.contains("add") else {
+                    return .failure("Unexpected command: \(arguments)")
+                }
+                addStarted.fulfill()
+                allowAddToFinish.wait()
+                return .failure("Add failed")
+            }
+        )
+        runners.applyScanResult([
+            RunningRunner(
+                processIdentifier: 1234,
+                runnerID: runners.runnerID,
+                path: "/tmp",
+                command: "amp --no-tui --runner-id test-runner"
+            ),
+        ])
+        let model = AppModel(
+            projects: store,
+            runners: runners,
+            launchAtLogin: LaunchAtLoginController()
+        )
+        let directoryURL = URL(fileURLWithPath: "/tmp/new-project", isDirectory: true)
+        let project = model.addProject(directoryURL: directoryURL)
+
+        await fulfillment(of: [addStarted], timeout: 2)
+        let duplicate = model.addProject(directoryURL: directoryURL)
+        model.remove(project)
+
+        XCTAssertEqual(duplicate.id, project.id)
+        XCTAssertEqual(store.projects.map(\.id), [project.id])
+        XCTAssertTrue(model.pendingProjectIDs.contains(project.id))
+
+        allowAddToFinish.signal()
+        for _ in 0..<20 where model.pendingProjectIDs.contains(project.id) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertEqual(store.projects.map(\.id), [project.id])
+        XCTAssertFalse(try XCTUnwrap(store.projects.first).isServed)
+        XCTAssertFalse(model.pendingProjectIDs.contains(project.id))
+        XCTAssertEqual(runners.errorMessage, "Add failed")
+    }
+
+    func testInitialScanReconcilesPersistedRunnerDirectories() async throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = ProjectStore(defaults: defaults)
+        let desiredDirectory = URL(fileURLWithPath: "/tmp/desired project", isDirectory: true)
+        let extraDirectory = URL(fileURLWithPath: "/tmp/old project", isDirectory: true)
+        store.add(directoryURL: desiredDirectory)
+        let extraRemoved = expectation(description: "Persisted extra directory removed")
+        let runners = RunnerManager(
+            runnerID: "test-runner",
+            ampExecutableURL: URL(fileURLWithPath: "/usr/bin/true"),
+            directoryCommandExecutor: RunnerDirectoryCommandExecutor { _, arguments in
+                if arguments.contains("list") {
+                    return .success(
+                        "Runner test-runner serves 2 directories:\n"
+                            + "  \(desiredDirectory.path)\n"
+                            + "  \(extraDirectory.path)"
+                    )
+                }
+                if arguments.contains("remove"), arguments.contains(extraDirectory.path) {
+                    extraRemoved.fulfill()
+                    return .success("")
+                }
+                return .failure("Unexpected command: \(arguments)")
+            }
+        )
+        let model = AppModel(
+            projects: store,
+            runners: runners,
+            launchAtLogin: LaunchAtLoginController()
+        )
+
+        runners.applyScanResult([
+            RunningRunner(
+                processIdentifier: 1234,
+                runnerID: runners.runnerID,
+                path: desiredDirectory.path,
+                command: "amp --no-tui --runner-id test-runner"
+            ),
+        ])
+
+        await fulfillment(of: [extraRemoved], timeout: 2)
+        withExtendedLifetime(model) {}
+    }
+
     func testDashboardRendersSharedRunnerDirectoryLayout() throws {
         let (defaults, suiteName) = try makeDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -88,6 +343,29 @@ final class ProjectStoreTests: XCTestCase {
             runners: runners,
             launchAtLogin: LaunchAtLoginController()
         )
+        try renderDashboard(model, filename: "shared-runner-dashboard.png")
+    }
+
+    func testDashboardRendersRunnerErrorNotice() throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = ProjectStore(defaults: defaults)
+        let directoryURL = URL(
+            fileURLWithPath: "/tmp/missing-project-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        store.add(directoryURL: directoryURL)
+        let runners = RunnerManager(runnerID: "example-mac-auto-runner")
+        runners.start(directories: [directoryURL])
+        let model = AppModel(
+            projects: store,
+            runners: runners,
+            launchAtLogin: LaunchAtLoginController()
+        )
+        try renderDashboard(model, filename: "shared-runner-dashboard-error.png")
+    }
+
+    private func renderDashboard(_ model: AppModel, filename: String) throws {
         let dashboard = RunnerDashboardView(model: model).frame(width: 900, height: 620)
         let hostingView = NSHostingView(rootView: dashboard)
         hostingView.frame = NSRect(x: 0, y: 0, width: 900, height: 620)
@@ -112,7 +390,7 @@ final class ProjectStoreTests: XCTestCase {
             .deletingLastPathComponent()
         let screenshotURL = repositoryURL
             .appendingPathComponent("build/verification", isDirectory: true)
-            .appendingPathComponent("shared-runner-dashboard.png")
+            .appendingPathComponent(filename)
         try FileManager.default.createDirectory(
             at: screenshotURL.deletingLastPathComponent(),
             withIntermediateDirectories: true

@@ -8,6 +8,7 @@ final class AppModel: ObservableObject {
     let launchAtLogin: LaunchAtLoginController
 
     @Published private(set) var showsRunnerLogs = true
+    @Published private(set) var pendingProjectIDs: Set<UUID> = []
 
     private var didStartMonitoring = false
     private var didStartRunner = false
@@ -50,26 +51,56 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func addProject(directoryURL: URL) -> RunnerProject {
-        let project = projects.add(directoryURL: directoryURL)
-        projects.setIsServed(true, for: project.id)
+        let project = projects.add(
+            directoryURL: directoryURL,
+            isServed: !runners.isRunning
+        )
+        guard !pendingProjectIDs.contains(project.id) else {
+            return project
+        }
         if runners.isRunning {
-            runners.addDirectory(project.directoryURL)
+            guard !project.isServed else {
+                return project
+            }
+            pendingProjectIDs.insert(project.id)
+            runners.addDirectory(project.directoryURL) { [weak self] succeeded in
+                self?.pendingProjectIDs.remove(project.id)
+                if succeeded {
+                    self?.projects.setIsServed(true, for: project.id)
+                }
+            }
         } else {
+            projects.setIsServed(true, for: project.id)
             startRunner()
         }
         return projects.projects.first(where: { $0.id == project.id }) ?? project
     }
 
     func setIsServed(_ isServed: Bool, for project: RunnerProject) {
-        projects.setIsServed(isServed, for: project.id)
-        if isServed {
-            if runners.isRunning {
-                runners.addDirectory(project.directoryURL)
+        guard project.isServed != isServed else {
+            return
+        }
+        guard !pendingProjectIDs.contains(project.id) else {
+            return
+        }
+        if runners.isRunning {
+            pendingProjectIDs.insert(project.id)
+            let updateStore: (Bool) -> Void = { [weak self] succeeded in
+                self?.pendingProjectIDs.remove(project.id)
+                if succeeded {
+                    self?.projects.setIsServed(isServed, for: project.id)
+                }
+            }
+            if isServed {
+                runners.addDirectory(project.directoryURL, completion: updateStore)
             } else {
+                runners.removeDirectory(project.directoryURL, completion: updateStore)
+            }
+        } else {
+            projects.setIsServed(isServed, for: project.id)
+            if isServed {
                 startRunner()
             }
-        } else if runners.isRunning {
-            runners.removeDirectory(project.directoryURL)
         }
     }
 
@@ -82,10 +113,20 @@ final class AppModel: ObservableObject {
     }
 
     func remove(_ project: RunnerProject) {
-        if project.isServed, runners.isRunning {
-            runners.removeDirectory(project.directoryURL)
+        guard !pendingProjectIDs.contains(project.id) else {
+            return
         }
-        projects.remove(id: project.id)
+        if project.isServed, runners.isRunning {
+            pendingProjectIDs.insert(project.id)
+            runners.removeDirectory(project.directoryURL) { [weak self] succeeded in
+                self?.pendingProjectIDs.remove(project.id)
+                if succeeded {
+                    self?.projects.remove(id: project.id)
+                }
+            }
+        } else {
+            projects.remove(id: project.id)
+        }
     }
 
     private var servedDirectories: [URL] {
@@ -94,14 +135,14 @@ final class AppModel: ObservableObject {
 
     private func observeRunnerScan() {
         runners.$hasCompletedInitialScan
-            .sink { [weak self] _ in
-                self?.startRunnerAfterInitialScan()
+            .sink { [weak self] hasCompletedInitialScan in
+                self?.startRunnerAfterInitialScan(hasCompletedInitialScan)
             }
             .store(in: &cancellables)
     }
 
-    private func startRunnerAfterInitialScan() {
-        guard runners.hasCompletedInitialScan, !didStartRunner else {
+    private func startRunnerAfterInitialScan(_ hasCompletedInitialScan: Bool) {
+        guard hasCompletedInitialScan, !didStartRunner else {
             return
         }
 

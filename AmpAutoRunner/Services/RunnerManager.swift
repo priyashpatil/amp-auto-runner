@@ -34,6 +34,44 @@ enum RunnerState: Equatable {
     case failed(String)
 }
 
+enum RunnerDirectoryCommandResult: Equatable {
+    case success(String)
+    case failure(String)
+}
+
+struct RunnerDirectoryCommandExecutor {
+    let execute: (URL, [String]) -> RunnerDirectoryCommandResult
+
+    static let live = RunnerDirectoryCommandExecutor { executableURL, arguments in
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = arguments
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let output = String(
+                decoding: outputPipe.fileHandleForReading.readDataToEndOfFile(),
+                as: UTF8.self
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            let error = String(
+                decoding: errorPipe.fileHandleForReading.readDataToEndOfFile(),
+                as: UTF8.self
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard process.terminationStatus == 0 else {
+                return .failure(error.isEmpty ? output : error)
+            }
+            return .success(output)
+        } catch {
+            return .failure(error.localizedDescription)
+        }
+    }
+}
+
 private struct RunnerTerminal {
     let master: FileHandle
     let slave: FileHandle
@@ -436,6 +474,7 @@ final class RunnerManager: ObservableObject {
     @Published private(set) var state: RunnerState = .stopped
     @Published private(set) var runningRunners: [RunningRunner] = []
     @Published private(set) var hasCompletedInitialScan = false
+    @Published private(set) var errorMessage: String?
 
     let logs = RunnerLogStore()
     let runnerID: String
@@ -449,9 +488,20 @@ final class RunnerManager: ObservableObject {
     private var scanInProgress = false
     private let scannerQueue = DispatchQueue(label: "AmpAutoRunner.runner-scanner", qos: .utility)
     private let directoryQueue = DispatchQueue(label: "AmpAutoRunner.runner-directories", qos: .utility)
+    private let ampExecutableURLOverride: URL?
+    private let directoryCommandExecutor: RunnerDirectoryCommandExecutor
+    private var desiredDirectoryPaths: Set<String> = []
+    private var reconciledProcessIdentifier: Int32?
+    private var reconcilingProcessIdentifier: Int32?
 
-    init(runnerID: String? = nil) {
+    init(
+        runnerID: String? = nil,
+        ampExecutableURL: URL? = nil,
+        directoryCommandExecutor: RunnerDirectoryCommandExecutor = .live
+    ) {
         self.runnerID = runnerID ?? RunnerManager.defaultRunnerID
+        ampExecutableURLOverride = ampExecutableURL
+        self.directoryCommandExecutor = directoryCommandExecutor
     }
 
     static var defaultRunnerID: String {
@@ -528,47 +578,79 @@ final class RunnerManager: ObservableObject {
 
     func applyScanResult(_ discoveredRunners: [RunningRunner]) {
         let isInitialScan = !hasCompletedInitialScan
-        if isInitialScan {
-            hasCompletedInitialScan = true
-        }
         if isInitialScan || runningRunners != discoveredRunners {
             runningRunners = discoveredRunners
         }
         if process?.isRunning != true {
-            if discoveredRunners.contains(where: { $0.runnerID == runnerID }) {
+            let matchingRunner = discoveredRunners.first { $0.runnerID == runnerID }
+            if state == .stopping {
+                if matchingRunner == nil {
+                    state = .stopped
+                }
+            } else if matchingRunner != nil {
                 state = .running
             } else if state == .running {
                 state = .stopped
             }
         }
+
+        if let matchingRunner = discoveredRunners.first(where: { $0.runnerID == runnerID }) {
+            if
+                matchingRunner.processIdentifier != reconciledProcessIdentifier,
+                matchingRunner.processIdentifier != reconcilingProcessIdentifier,
+                !desiredDirectoryPaths.isEmpty
+            {
+                reconcilingProcessIdentifier = matchingRunner.processIdentifier
+                reconcileDirectories(processIdentifier: matchingRunner.processIdentifier)
+            }
+        } else {
+            reconciledProcessIdentifier = nil
+            reconcilingProcessIdentifier = nil
+        }
+
+        if isInitialScan {
+            hasCompletedInitialScan = true
+        }
     }
 
     func start(directories: [URL]) {
-        guard process == nil, !isRunning else {
+        desiredDirectoryPaths = Set(directories.map(normalizedPath))
+        guard process == nil else {
             return
         }
         guard !directories.isEmpty else {
-            state = .stopped
+            if isRunning {
+                stop()
+            } else {
+                state = .stopped
+            }
+            return
+        }
+        guard !isRunning else {
+            let processIdentifier = runningRunners
+                .first(where: { $0.runnerID == runnerID })?
+                .processIdentifier
+            reconcilingProcessIdentifier = processIdentifier
+            reconcileDirectories(processIdentifier: processIdentifier)
             return
         }
         guard directories.allSatisfy({ isDirectory($0) }) else {
-            state = .failed("One or more served directories no longer exist.")
+            fail("One or more served directories no longer exist.")
             return
         }
 
-        guard let ampExecutableURL = locateAmpExecutable() else {
-            state = .failed(
-                "Amp CLI was not found. Install Amp in ~/.local/bin or a standard Homebrew location."
-            )
+        guard let ampExecutableURL = ampExecutableURL() else {
+            fail("Amp CLI was not found. Install Amp in ~/.local/bin or a standard Homebrew location.")
             return
         }
 
+        errorMessage = nil
         state = .starting
         outputArchive.reset(projectID: outputID)
 
         guard let terminal = makePseudoTerminal() else {
             _ = outputArchive.take(projectID: outputID)
-            state = .failed("Could not create a terminal for Amp.")
+            fail("Could not create a terminal for Amp.")
             return
         }
 
@@ -638,16 +720,36 @@ final class RunnerManager: ObservableObject {
             self.process = nil
             self.terminal = nil
             _ = outputArchive.take(projectID: outputID)
-            state = .failed(error.localizedDescription)
+            fail(error.localizedDescription)
         }
     }
 
-    func addDirectory(_ directory: URL) {
-        updateDirectory(directory, command: "add")
+    func addDirectory(
+        _ directory: URL,
+        completion: @escaping (Bool) -> Void = { _ in }
+    ) {
+        updateDirectory(directory, command: "add") { [weak self] succeeded in
+            if succeeded {
+                self?.desiredDirectoryPaths.insert(self?.normalizedPath(directory) ?? directory.path)
+            }
+            completion(succeeded)
+        }
     }
 
-    func removeDirectory(_ directory: URL) {
-        updateDirectory(directory, command: "remove")
+    func removeDirectory(
+        _ directory: URL,
+        completion: @escaping (Bool) -> Void = { _ in }
+    ) {
+        updateDirectory(directory, command: "remove") { [weak self] succeeded in
+            if succeeded {
+                self?.desiredDirectoryPaths.remove(self?.normalizedPath(directory) ?? directory.path)
+            }
+            completion(succeeded)
+        }
+    }
+
+    func clearError() {
+        errorMessage = nil
     }
 
     func stop() {
@@ -661,9 +763,11 @@ final class RunnerManager: ObservableObject {
             state = .stopped
             return
         }
-        state = Darwin.kill(runner.processIdentifier, SIGTERM) == 0
-            ? .stopping
-            : .failed("Could not stop the Amp runner.")
+        if Darwin.kill(runner.processIdentifier, SIGTERM) == 0 {
+            state = .stopping
+        } else {
+            fail("Could not stop the Amp runner.")
+        }
     }
 
     func stopAll() {
@@ -694,47 +798,174 @@ final class RunnerManager: ObservableObject {
             }
             let detail = output.flatMap { $0.isEmpty ? nil : $0 }
                 ?? "Amp exited with status \(terminatedProcess.terminationStatus)."
-            state = .failed(detail)
+            fail(detail)
         }
 
         isStopping = false
         refreshRunningRunners()
     }
 
-    private func updateDirectory(_ directory: URL, command: String) {
-        guard let ampExecutableURL = locateAmpExecutable() else {
-            state = .failed("Amp CLI was not found.")
+    private func updateDirectory(
+        _ directory: URL,
+        command: String,
+        completion: @escaping (Bool) -> Void
+    ) {
+        guard let ampExecutableURL = ampExecutableURL() else {
+            fail("Amp CLI was not found.")
+            completion(false)
             return
         }
+        errorMessage = nil
         let runnerID = runnerID
+        let executor = directoryCommandExecutor
         directoryQueue.async { [weak self] in
-            let process = Process()
-            let errorPipe = Pipe()
-            process.executableURL = ampExecutableURL
-            process.arguments = [
-                "runner", "dirs", command, directory.path,
-                "--runner-id", runnerID,
-            ]
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = errorPipe
-            do {
-                try process.run()
-                process.waitUntilExit()
-                guard process.terminationStatus != 0 else {
-                    return
-                }
-                let data = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                let detail = String(decoding: data, as: UTF8.self)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                DispatchQueue.main.async {
-                    self?.state = .failed(detail.isEmpty ? "Could not update served directories." : detail)
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self?.state = .failed(error.localizedDescription)
+            let result = executor.execute(
+                ampExecutableURL,
+                [
+                    "runner", "dirs", command, directory.path,
+                    "--runner-id", runnerID,
+                ]
+            )
+            DispatchQueue.main.sync {
+                switch result {
+                case .success:
+                    completion(true)
+                case let .failure(detail):
+                    self?.reportCommandFailure(
+                        detail.isEmpty ? "Could not update served directories." : detail
+                    )
+                    completion(false)
                 }
             }
         }
+    }
+
+    private func reconcileDirectories(processIdentifier: Int32?) {
+        guard let ampExecutableURL = ampExecutableURL() else {
+            reportCommandFailure("Amp CLI was not found.")
+            reconcilingProcessIdentifier = nil
+            return
+        }
+
+        errorMessage = nil
+        let runnerID = runnerID
+        let executor = directoryCommandExecutor
+        directoryQueue.async { [weak self] in
+            guard let self else {
+                return
+            }
+            let desiredDirectoryPaths = DispatchQueue.main.sync {
+                self.desiredDirectoryPaths
+            }
+            var listResult = executor.execute(
+                ampExecutableURL,
+                ["runner", "dirs", "list", "--runner-id", runnerID]
+            )
+            for _ in 0..<19 {
+                guard
+                    case let .failure(detail) = listResult,
+                    detail.contains("No running runner is listening")
+                else {
+                    break
+                }
+                Thread.sleep(forTimeInterval: 0.1)
+                listResult = executor.execute(
+                    ampExecutableURL,
+                    ["runner", "dirs", "list", "--runner-id", runnerID]
+                )
+            }
+
+            guard case let .success(output) = listResult else {
+                let detail: String
+                if case let .failure(message) = listResult {
+                    detail = message
+                } else {
+                    detail = "Could not inspect served directories."
+                }
+                DispatchQueue.main.async {
+                    self.reconcilingProcessIdentifier = nil
+                    self.reportCommandFailure(detail)
+                }
+                return
+            }
+
+            let actualDirectoryPaths = Self.parseServedDirectoryPaths(output)
+            let removals = actualDirectoryPaths.subtracting(desiredDirectoryPaths).sorted()
+            let additions = desiredDirectoryPaths.subtracting(actualDirectoryPaths).sorted()
+
+            for path in removals {
+                let result = executor.execute(
+                    ampExecutableURL,
+                    ["runner", "dirs", "remove", path, "--runner-id", runnerID]
+                )
+                if case let .failure(detail) = result {
+                    DispatchQueue.main.async {
+                        self.reconcilingProcessIdentifier = nil
+                        self.reportCommandFailure(detail)
+                    }
+                    return
+                }
+            }
+
+            for path in additions {
+                let result = executor.execute(
+                    ampExecutableURL,
+                    ["runner", "dirs", "add", path, "--runner-id", runnerID]
+                )
+                if case let .failure(detail) = result {
+                    DispatchQueue.main.async {
+                        self.reconcilingProcessIdentifier = nil
+                        self.reportCommandFailure(detail)
+                    }
+                    return
+                }
+            }
+
+            DispatchQueue.main.async {
+                self.reconcilingProcessIdentifier = nil
+                self.reconciledProcessIdentifier = processIdentifier
+            }
+        }
+    }
+
+    nonisolated static func parseServedDirectoryPaths(
+        _ output: String,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> Set<String> {
+        Set(output.split(separator: "\n").compactMap { line in
+            guard line.first?.isWhitespace == true else {
+                return nil
+            }
+            var path = line.trimmingCharacters(in: .whitespaces)
+            if path == "~" {
+                path = homeDirectory.path
+            } else if path.hasPrefix("~/") {
+                path = homeDirectory.appendingPathComponent(String(path.dropFirst(2))).path
+            }
+            guard path.hasPrefix("/") else {
+                return nil
+            }
+            return normalizedPath(URL(fileURLWithPath: path, isDirectory: true))
+        })
+    }
+
+    private func fail(_ message: String) {
+        state = .failed(message)
+        errorMessage = message
+    }
+
+    private func reportCommandFailure(_ message: String) {
+        let detail = message.isEmpty ? "Could not update served directories." : message
+        errorMessage = detail
+        logs.append(Data("[Amp Auto Runner] \(detail)\n".utf8))
+    }
+
+    private func normalizedPath(_ url: URL) -> String {
+        Self.normalizedPath(url)
+    }
+
+    nonisolated private static func normalizedPath(_ url: URL) -> String {
+        url.standardizedFileURL.resolvingSymlinksInPath().path
     }
 
     private func isDirectory(_ url: URL) -> Bool {
@@ -756,7 +987,11 @@ final class RunnerManager: ObservableObject {
         )
     }
 
-    private func locateAmpExecutable() -> URL? {
+    private func ampExecutableURL() -> URL? {
+        if let ampExecutableURLOverride {
+            return ampExecutableURLOverride
+        }
+
         let environmentPaths = ProcessInfo.processInfo.environment["PATH"]?
             .split(separator: ":")
             .map { URL(fileURLWithPath: String($0)).appendingPathComponent("amp") }

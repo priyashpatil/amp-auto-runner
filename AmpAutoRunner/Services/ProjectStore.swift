@@ -23,8 +23,8 @@ final class ProjectStore: ObservableObject {
     }
 
     @discardableResult
-    func add(directoryURL: URL) -> RunnerProject {
-        let candidate = RunnerProject(path: directoryURL.path)
+    func add(directoryURL: URL, isServed: Bool = true) -> RunnerProject {
+        let candidate = RunnerProject(path: directoryURL.path, isServed: isServed)
 
         if let index = projects.firstIndex(where: { $0.path == candidate.path }) {
             return projects[index]
