@@ -81,9 +81,10 @@ final class RunnerProjectTests: XCTestCase {
 
     func testRunnerDirectoryListParserPreservesSpacesAndExpandsHome() {
         let output = """
-        Runner test-runner serves 2 directories:
+        Runner test-runner serves 3 directories:
           ~/code/project one
           /tmp/project two
+          ~/code/rift (git@github.com:example/rift.git)
         """
 
         XCTAssertEqual(
@@ -91,7 +92,24 @@ final class RunnerProjectTests: XCTestCase {
                 output,
                 homeDirectory: URL(fileURLWithPath: "/Users/example", isDirectory: true)
             ),
-            ["/Users/example/code/project one", "/tmp/project two"]
+            [
+                "/Users/example/code/project one",
+                "/tmp/project two",
+                "/Users/example/code/rift",
+            ]
+        )
+    }
+
+    func testRunnerDirectoryMetadataStripperPreservesOrdinaryParentheses() {
+        XCTAssertEqual(
+            RunnerManager.pathWithoutMetadata("/tmp/project (archived)"),
+            "/tmp/project (archived)"
+        )
+        XCTAssertEqual(
+            RunnerManager.pathWithoutMetadata(
+                "/tmp/project (https://github.com/example/project.git)"
+            ),
+            "/tmp/project"
         )
     }
 

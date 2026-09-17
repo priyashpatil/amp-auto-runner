@@ -18,6 +18,7 @@ final class AppModel: ObservableObject {
         projects = ProjectStore()
         runners = RunnerManager()
         launchAtLogin = LaunchAtLoginController()
+        migrateStoredProjectPaths()
         observeRunnerScan()
     }
 
@@ -29,6 +30,7 @@ final class AppModel: ObservableObject {
         self.projects = projects
         self.runners = runners
         self.launchAtLogin = launchAtLogin
+        migrateStoredProjectPaths()
         observeRunnerScan()
     }
 
@@ -161,6 +163,24 @@ final class AppModel: ObservableObject {
                 .resolvingSymlinksInPath()
                 .path
             projects.setIsServed(servedDirectoryPaths.contains(normalizedPath), for: project.id)
+        }
+    }
+
+    private func migrateStoredProjectPaths() {
+        for project in projects.projects {
+            let path = RunnerManager.pathWithoutMetadata(project.path)
+            guard path != project.path else {
+                continue
+            }
+
+            let canonicalProject = projects.add(
+                directoryURL: URL(fileURLWithPath: path, isDirectory: true),
+                isServed: project.isServed
+            )
+            if project.isServed {
+                projects.setIsServed(true, for: canonicalProject.id)
+            }
+            projects.remove(id: project.id)
         }
     }
 

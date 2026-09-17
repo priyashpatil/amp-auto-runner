@@ -893,7 +893,9 @@ final class RunnerManager: ObservableObject {
             guard line.first?.isWhitespace == true else {
                 return nil
             }
-            var path = line.trimmingCharacters(in: .whitespaces)
+            var path = pathWithoutMetadata(
+                line.trimmingCharacters(in: .whitespaces)
+            )
             if path == "~" {
                 path = homeDirectory.path
             } else if path.hasPrefix("~/") {
@@ -904,6 +906,21 @@ final class RunnerManager: ObservableObject {
             }
             return normalizedPath(URL(fileURLWithPath: path, isDirectory: true))
         })
+    }
+
+    nonisolated static func pathWithoutMetadata(_ value: String) -> String {
+        guard
+            value.hasSuffix(")"),
+            let metadataStart = value.range(of: " (", options: .backwards)
+        else {
+            return value
+        }
+
+        let metadata = value[metadataStart.upperBound..<value.index(before: value.endIndex)]
+        guard metadata.hasPrefix("git@") || metadata.contains("://") else {
+            return value
+        }
+        return String(value[..<metadataStart.lowerBound])
     }
 
     private func fail(_ message: String) {

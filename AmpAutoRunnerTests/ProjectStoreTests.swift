@@ -399,6 +399,29 @@ final class ProjectStoreTests: XCTestCase {
         withExtendedLifetime(model) {}
     }
 
+    func testStoredGitMetadataPathMigratesBeforeRunnerScan() throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = ProjectStore(defaults: defaults)
+        let directory = URL(fileURLWithPath: "/tmp/rift", isDirectory: true)
+        let malformedPath = "/tmp/rift (git@github.com:example/rift.git)"
+        store.add(directoryURL: directory, isServed: false)
+        store.add(
+            directoryURL: URL(fileURLWithPath: malformedPath, isDirectory: true),
+            isServed: true
+        )
+        let runners = RunnerManager(runnerID: "test-runner")
+        let model = AppModel(
+            projects: store,
+            runners: runners,
+            launchAtLogin: LaunchAtLoginController()
+        )
+
+        XCTAssertEqual(store.projects.map(\.path), [directory.path])
+        XCTAssertTrue(try XCTUnwrap(store.projects.first).isServed)
+        withExtendedLifetime(model) {}
+    }
+
     func testDashboardRendersSharedRunnerDirectoryLayout() throws {
         let (defaults, suiteName) = try makeDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }
