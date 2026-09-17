@@ -1,31 +1,22 @@
-import Darwin
+import AppKit
+import SwiftUI
 import XCTest
 @testable import AmpAutoRunner
 
 @MainActor
 final class ProjectStoreTests: XCTestCase {
-    func testRunnerListAndLogsAreShownInitiallyAndCannotBothBeHidden() {
+    func testRunnerLogsAreShownInitiallyAndCanBeHidden() {
         let model = AppModel()
 
-        XCTAssertTrue(model.showsRunnerList)
-        XCTAssertTrue(model.showsRunnerLogs)
-
-        model.setRunnerListVisible(false)
-
-        XCTAssertFalse(model.showsRunnerList)
         XCTAssertTrue(model.showsRunnerLogs)
 
         model.setRunnerLogsVisible(false)
-
-        XCTAssertTrue(model.showsRunnerList)
         XCTAssertFalse(model.showsRunnerLogs)
     }
 
-    func testProjectsPersistAndDuplicatePathsAreIgnored() throws {
-        let suiteName = "ProjectStoreTests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+    func testDirectoriesPersistAndDuplicatePathsAreIgnored() throws {
+        let (defaults, suiteName) = try makeDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }
-
         let store = ProjectStore(defaults: defaults)
         let directoryURL = URL(fileURLWithPath: "/tmp/example-project", isDirectory: true)
 
@@ -34,243 +25,27 @@ final class ProjectStoreTests: XCTestCase {
         let restoredStore = ProjectStore(defaults: defaults)
 
         XCTAssertEqual(firstProject.id, duplicateProject.id)
-        XCTAssertEqual(store.projects.count, 1)
         XCTAssertEqual(restoredStore.projects, [firstProject])
     }
 
-    func testAdoptingRunningProjectPreservesItsRunnerID() throws {
-        let suiteName = "ProjectStoreTests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+    func testServedStatePersists() throws {
+        let (defaults, suiteName) = try makeDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }
-
         let store = ProjectStore(defaults: defaults)
-        let directoryURL = URL(fileURLWithPath: "/tmp/example-project", isDirectory: true)
-        let originalProject = store.add(directoryURL: directoryURL)
-
-        let adoptedProject = store.add(directoryURL: directoryURL, runnerID: "existing-runner")
-        let restoredStore = ProjectStore(defaults: defaults)
-
-        XCTAssertEqual(adoptedProject.id, originalProject.id)
-        XCTAssertEqual(adoptedProject.runnerID, "existing-runner")
-        XCTAssertEqual(restoredStore.projects, [adoptedProject])
-    }
-
-    func testAdoptingDuplicateRunnerIDsCreatesUniqueSavedIDs() throws {
-        let suiteName = "ProjectStoreTests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-
-        let store = ProjectStore(defaults: defaults)
-        let firstProject = store.add(
-            directoryURL: URL(fileURLWithPath: "/tmp/first"),
-            runnerID: "shared-runner"
-        )
-        let secondProject = store.add(
-            directoryURL: URL(fileURLWithPath: "/tmp/second"),
-            runnerID: "shared-runner"
-        )
-
-        XCTAssertEqual(firstProject.runnerID, "shared-runner")
-        XCTAssertEqual(secondProject.runnerID, "shared-runner-2")
-        XCTAssertEqual(Set(store.projects.map(\.runnerID)).count, 2)
-    }
-
-    func testDuplicatePersistedRunnerIDsAreRepaired() throws {
-        let suiteName = "ProjectStoreTests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-
-        let storedProjects = [
-            RunnerProject(path: "/tmp/first", runnerID: "shared-runner"),
-            RunnerProject(path: "/tmp/second", runnerID: "shared-runner"),
-        ]
-        defaults.set(try JSONEncoder().encode(storedProjects), forKey: "runnerProjects")
-
-        let store = ProjectStore(defaults: defaults)
-        let restoredStore = ProjectStore(defaults: defaults)
-
-        XCTAssertEqual(store.projects.map(\.runnerID), ["shared-runner", "shared-runner-2"])
-        XCTAssertEqual(restoredStore.projects, store.projects)
-    }
-
-    func testRunningRunnerIsManagedOnlyAfterItsProjectIsSaved() throws {
-        let suiteName = "ProjectStoreTests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-
-        let store = ProjectStore(defaults: defaults)
-        let model = AppModel(
-            projects: store,
-            runners: RunnerManager(),
-            launchAtLogin: LaunchAtLoginController()
-        )
-        let runner = RunningRunner(
-            processIdentifier: Int32.max,
-            runnerID: "existing-runner",
-            path: "/tmp/example-project",
-            command: "amp --no-tui --runner-id existing-runner"
-        )
-
-        XCTAssertFalse(model.isManaged(runner))
-
-        store.add(directoryURL: URL(fileURLWithPath: "/tmp/example-project", isDirectory: true))
-
-        XCTAssertTrue(model.isManaged(runner))
-    }
-
-    func testEnablingAutoStartAdoptsAnAvailableRunnerImmediately() throws {
-        let suiteName = "ProjectStoreTests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-
-        let store = ProjectStore(defaults: defaults)
-        let model = AppModel(
-            projects: store,
-            runners: RunnerManager(),
-            launchAtLogin: LaunchAtLoginController()
-        )
-        let runner = RunningRunner(
-            processIdentifier: Int32.max,
-            runnerID: "existing-runner",
-            path: "/tmp/example-project",
-            command: "amp --no-tui --runner-id existing-runner"
-        )
-
-        model.setAutoStarts(true, for: runner)
-
-        XCTAssertTrue(model.isManaged(runner))
-        XCTAssertTrue(model.autoStarts(runner))
-        XCTAssertEqual(store.projects.first?.runnerID, "existing-runner")
-    }
-
-    func testEnablingAutoStartDoesNotStartAStoppedRunner() throws {
-        let suiteName = "ProjectStoreTests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-
-        let store = ProjectStore(defaults: defaults)
-        let runners = RunnerManager()
-        let model = AppModel(
-            projects: store,
-            runners: runners,
-            launchAtLogin: LaunchAtLoginController()
-        )
         let project = store.add(
-            directoryURL: URL(
-                fileURLWithPath: "/tmp/missing-project-\(UUID().uuidString)",
-                isDirectory: true
-            )
+            directoryURL: URL(fileURLWithPath: "/tmp/example-project", isDirectory: true)
         )
-        store.setStartsAutomatically(false, for: project.id)
 
-        model.setAutoStarts(true, for: project)
+        store.setIsServed(false, for: project.id)
 
-        XCTAssertTrue(store.projects.first?.startsAutomatically == true)
-        XCTAssertEqual(runners.state(for: project), .stopped)
+        XCTAssertFalse(try XCTUnwrap(ProjectStore(defaults: defaults).projects.first).isServed)
     }
 
-    func testAdoptingAvailableRunnerMigratesItsProcessIntoTheApp() async throws {
-        let suiteName = "ProjectStoreTests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+    func testAddingMissingDirectoryAttemptsToStartSharedRunner() throws {
+        let (defaults, suiteName) = try makeDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }
-
-        let directoryURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: directoryURL,
-            withIntermediateDirectories: true
-        )
-        defer { try? FileManager.default.removeItem(at: directoryURL) }
-
-        let externalProcess = Process()
-        externalProcess.executableURL = URL(fileURLWithPath: "/bin/sleep")
-        externalProcess.arguments = ["30"]
-        try externalProcess.run()
-        defer {
-            if externalProcess.isRunning {
-                externalProcess.terminate()
-            }
-            externalProcess.waitUntilExit()
-        }
-
         let store = ProjectStore(defaults: defaults)
-        let runners = RunnerManager()
-        let model = AppModel(
-            projects: store,
-            runners: runners,
-            launchAtLogin: LaunchAtLoginController()
-        )
-        let runner = RunningRunner(
-            processIdentifier: externalProcess.processIdentifier,
-            runnerID: "existing-runner",
-            path: directoryURL.path,
-            command: "amp --no-tui --runner-id existing-runner"
-        )
-
-        model.setAutoStarts(true, for: runner)
-        try FileManager.default.removeItem(at: directoryURL)
-
-        for _ in 0..<50 {
-            if case .failed = runners.state(for: try XCTUnwrap(store.projects.first)) {
-                break
-            }
-            try await Task.sleep(for: .milliseconds(50))
-        }
-
-        XCTAssertFalse(externalProcess.isRunning)
-        XCTAssertTrue(model.isManaged(runner))
-        guard case .failed = runners.state(for: try XCTUnwrap(store.projects.first)) else {
-            return XCTFail("The app should start its replacement after stopping the external runner")
-        }
-    }
-
-    func testMigrationDoesNotKillAProcessThatIgnoresTermination() async throws {
-        let externalProcess = Process()
-        externalProcess.executableURL = URL(fileURLWithPath: "/bin/sh")
-        externalProcess.arguments = [
-            "-c",
-            "trap '' TERM; exec /usr/bin/tail -f /dev/null",
-        ]
-        try externalProcess.run()
-        defer {
-            if externalProcess.isRunning {
-                Darwin.kill(externalProcess.processIdentifier, SIGKILL)
-            }
-            externalProcess.waitUntilExit()
-        }
-        try await Task.sleep(for: .milliseconds(100))
-
-        let project = RunnerProject(path: "/tmp/example-project")
-        let runner = RunningRunner(
-            processIdentifier: externalProcess.processIdentifier,
-            runnerID: project.runnerID,
-            path: project.path,
-            command: "amp --no-tui --runner-id \(project.runnerID)"
-        )
-        let runners = RunnerManager()
-
-        runners.migrate(runner, to: project)
-
-        for _ in 0..<60 {
-            if case .failed = runners.state(for: project) {
-                break
-            }
-            try await Task.sleep(for: .milliseconds(100))
-        }
-
-        XCTAssertTrue(externalProcess.isRunning)
-        guard case .failed = runners.state(for: project) else {
-            return XCTFail("Migration should fail when the runner ignores SIGTERM")
-        }
-    }
-
-    func testAddingProjectEnablesAutoStartAndAttemptsLaunch() throws {
-        let suiteName = "ProjectStoreTests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-
-        let store = ProjectStore(defaults: defaults)
-        let runners = RunnerManager()
+        let runners = RunnerManager(runnerID: "test-runner")
         let model = AppModel(
             projects: store,
             runners: runners,
@@ -280,29 +55,74 @@ final class ProjectStoreTests: XCTestCase {
             fileURLWithPath: "/tmp/missing-project-\(UUID().uuidString)",
             isDirectory: true
         )
-        let existingProject = store.add(directoryURL: directoryURL)
-        store.setStartsAutomatically(false, for: existingProject.id)
 
         let project = model.addProject(directoryURL: directoryURL)
 
-        XCTAssertTrue(store.projects.first?.startsAutomatically == true)
-        guard case .failed = runners.state(for: project) else {
-            return XCTFail("Adding a project should immediately attempt to start its runner")
+        XCTAssertTrue(project.isServed)
+        guard case .failed = runners.state else {
+            return XCTFail("Adding the first directory should attempt to start the shared runner")
         }
     }
 
-    func testRunnerIDEditsAreNormalizedAndPersisted() throws {
-        let suiteName = "ProjectStoreTests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+    func testDashboardRendersSharedRunnerDirectoryLayout() throws {
+        let (defaults, suiteName) = try makeDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }
-
         let store = ProjectStore(defaults: defaults)
-        let project = store.add(directoryURL: URL(fileURLWithPath: "/tmp/example-project"))
+        store.add(
+            directoryURL: URL(
+                fileURLWithPath: "/Users/example/code/amp-auto-runner",
+                isDirectory: true
+            )
+        )
+        let runners = RunnerManager(runnerID: "example-mac-auto-runner")
+        runners.applyScanResult([
+            RunningRunner(
+                processIdentifier: 1234,
+                runnerID: runners.runnerID,
+                path: "/Users/example/code",
+                command: "amp --no-tui --runner-id example-mac-auto-runner"
+            ),
+        ])
+        let model = AppModel(
+            projects: store,
+            runners: runners,
+            launchAtLogin: LaunchAtLoginController()
+        )
+        let dashboard = RunnerDashboardView(model: model).frame(width: 900, height: 620)
+        let hostingView = NSHostingView(rootView: dashboard)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 900, height: 620)
+        let window = NSWindow(
+            contentRect: hostingView.frame,
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostingView
+        window.layoutIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+        hostingView.displayIfNeeded()
 
-        let runnerID = store.setRunnerID("  My Custom_Runner!!  ", for: project.id)
-        let restoredStore = ProjectStore(defaults: defaults)
+        let bitmap = try XCTUnwrap(
+            hostingView.bitmapImageRepForCachingDisplay(in: hostingView.bounds)
+        )
+        hostingView.cacheDisplay(in: hostingView.bounds, to: bitmap)
 
-        XCTAssertEqual(runnerID, "my-custom-runner")
-        XCTAssertEqual(restoredStore.projects.first?.runnerID, "my-custom-runner")
+        let repositoryURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let screenshotURL = repositoryURL
+            .appendingPathComponent("build/verification", isDirectory: true)
+            .appendingPathComponent("shared-runner-dashboard.png")
+        try FileManager.default.createDirectory(
+            at: screenshotURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+            .write(to: screenshotURL)
+    }
+
+    private func makeDefaults() throws -> (UserDefaults, String) {
+        let suiteName = "ProjectStoreTests-\(UUID().uuidString)"
+        return (try XCTUnwrap(UserDefaults(suiteName: suiteName)), suiteName)
     }
 }

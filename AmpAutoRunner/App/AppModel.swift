@@ -7,18 +7,17 @@ final class AppModel: ObservableObject {
     let runners: RunnerManager
     let launchAtLogin: LaunchAtLoginController
 
-    @Published private(set) var showsRunnerList = true
     @Published private(set) var showsRunnerLogs = true
 
     private var didStartMonitoring = false
-    private var didAutoStartProjects = false
+    private var didStartRunner = false
     private var cancellables: Set<AnyCancellable> = []
 
     init() {
         projects = ProjectStore()
         runners = RunnerManager()
         launchAtLogin = LaunchAtLoginController()
-        observeRunningRunners()
+        observeRunnerScan()
     }
 
     init(
@@ -29,7 +28,7 @@ final class AppModel: ObservableObject {
         self.projects = projects
         self.runners = runners
         self.launchAtLogin = launchAtLogin
-        observeRunningRunners()
+        observeRunnerScan()
     }
 
     func applicationDidFinishLaunching() {
@@ -41,128 +40,72 @@ final class AppModel: ObservableObject {
         runners.startMonitoring()
     }
 
-    func toggleRunnerList() {
-        setRunnerListVisible(!showsRunnerList)
-    }
-
-    func setRunnerListVisible(_ isVisible: Bool) {
-        if !isVisible, !showsRunnerLogs {
-            showsRunnerLogs = true
-        }
-        showsRunnerList = isVisible
-    }
-
     func toggleRunnerLogs() {
         setRunnerLogsVisible(!showsRunnerLogs)
     }
 
     func setRunnerLogsVisible(_ isVisible: Bool) {
-        if !isVisible, !showsRunnerList {
-            showsRunnerList = true
-        }
         showsRunnerLogs = isVisible
-    }
-
-    func setAutoStarts(_ autoStarts: Bool, for project: RunnerProject) {
-        projects.setStartsAutomatically(autoStarts, for: project.id)
-    }
-
-    func autoStarts(_ runner: RunningRunner) -> Bool {
-        project(for: runner)?.startsAutomatically == true
-    }
-
-    func isManaged(_ runner: RunningRunner) -> Bool {
-        project(for: runner) != nil
     }
 
     @discardableResult
     func addProject(directoryURL: URL) -> RunnerProject {
         let project = projects.add(directoryURL: directoryURL)
-        projects.setStartsAutomatically(true, for: project.id)
-        migrateOrStart(project)
-        return project
+        projects.setIsServed(true, for: project.id)
+        if runners.isRunning {
+            runners.addDirectory(project.directoryURL)
+        } else {
+            startRunner()
+        }
+        return projects.projects.first(where: { $0.id == project.id }) ?? project
     }
 
-    func setAutoStarts(_ autoStarts: Bool, for runner: RunningRunner) {
-        if autoStarts {
-            guard let directoryURL = runner.directoryURL else {
-                return
+    func setIsServed(_ isServed: Bool, for project: RunnerProject) {
+        projects.setIsServed(isServed, for: project.id)
+        if isServed {
+            if runners.isRunning {
+                runners.addDirectory(project.directoryURL)
+            } else {
+                startRunner()
             }
-
-            let project = projects.add(directoryURL: directoryURL, runnerID: runner.runnerID)
-            projects.setStartsAutomatically(true, for: project.id)
-            runners.migrate(runner, to: project)
-            return
+        } else if runners.isRunning {
+            runners.removeDirectory(project.directoryURL)
         }
-
-        guard let project = project(for: runner) else {
-            return
-        }
-        projects.setStartsAutomatically(false, for: project.id)
     }
 
-    @discardableResult
-    func setRunnerID(_ runnerID: String, for project: RunnerProject) -> String {
-        guard
-            runners.runningRunner(for: project) == nil,
-            runners.state(for: project) != .starting,
-            runners.state(for: project) != .stopping
-        else {
-            return project.runnerID
-        }
-
-        return projects.setRunnerID(runnerID, for: project.id) ?? project.runnerID
+    func startRunner() {
+        runners.start(directories: servedDirectories)
     }
 
-    func stop(_ runner: RunningRunner) {
-        runners.stop(runner)
+    func stopRunner() {
+        runners.stop()
     }
 
     func remove(_ project: RunnerProject) {
-        runners.stop(projectID: project.id)
+        if project.isServed, runners.isRunning {
+            runners.removeDirectory(project.directoryURL)
+        }
         projects.remove(id: project.id)
     }
 
-    private func observeRunningRunners() {
-        runners.$runningRunners
+    private var servedDirectories: [URL] {
+        projects.projects.filter(\.isServed).map(\.directoryURL)
+    }
+
+    private func observeRunnerScan() {
+        runners.$hasCompletedInitialScan
             .sink { [weak self] _ in
-                self?.autoStartSavedProjects()
+                self?.startRunnerAfterInitialScan()
             }
             .store(in: &cancellables)
     }
 
-    private func autoStartSavedProjects() {
-        guard runners.hasCompletedInitialScan, !didAutoStartProjects else {
+    private func startRunnerAfterInitialScan() {
+        guard runners.hasCompletedInitialScan, !didStartRunner else {
             return
         }
 
-        didAutoStartProjects = true
-        for project in projects.projects where project.startsAutomatically {
-            runners.start(project, automatically: true)
-        }
-    }
-
-    private func migrateOrStart(_ project: RunnerProject) {
-        let match = RunnerMatcher.runner(
-            for: project,
-            among: projects.projects,
-            and: runners.runningRunners
-        )
-        if case let .matched(runningRunner) = match {
-            if !runners.isOwned(runningRunner) {
-                runners.migrate(runningRunner, to: project)
-            }
-            return
-        }
-
-        runners.start(project)
-    }
-
-    func project(for runner: RunningRunner) -> RunnerProject? {
-        RunnerMatcher.project(
-            for: runner,
-            among: projects.projects,
-            and: runners.runningRunners
-        )
+        didStartRunner = true
+        startRunner()
     }
 }

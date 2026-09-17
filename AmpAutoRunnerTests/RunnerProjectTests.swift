@@ -3,34 +3,25 @@ import XCTest
 @testable import AmpAutoRunner
 
 final class RunnerProjectTests: XCTestCase {
-    func testRunnerIDIsStableAndHostnameSafe() {
+    func testLegacyAutoStartSettingMigratesToServedState() throws {
         let id = UUID(uuidString: "01234567-89AB-CDEF-0123-456789ABCDEF")!
-        let projectURL = URL(fileURLWithPath: "/tmp/Café Project!!", isDirectory: true)
+        let data = Data("""
+        {"id":"\(id.uuidString)","path":"/tmp/example","runnerID":"old-runner","startsAutomatically":false}
+        """.utf8)
 
-        let runnerID = RunnerProject.makeRunnerID(for: projectURL, id: id)
+        let project = try JSONDecoder().decode(RunnerProject.self, from: data)
 
-        XCTAssertEqual(runnerID, "cafe-project-012345")
-        XCTAssertLessThanOrEqual(runnerID.count, 63)
-        XCTAssertNotNil(runnerID.range(of: "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$", options: .regularExpression))
+        XCTAssertEqual(project.id, id)
+        XCTAssertEqual(project.path, "/tmp/example")
+        XCTAssertFalse(project.isServed)
     }
 
-    func testLongRunnerIDDoesNotExceedHostnameLabelLimit() {
-        let id = UUID(uuidString: "ABCDEF01-2345-6789-ABCD-EF0123456789")!
-        let name = String(repeating: "long-project-name-", count: 10)
-        let projectURL = URL(fileURLWithPath: "/tmp/\(name)", isDirectory: true)
+    @MainActor
+    func testRunnerUsesOneStableHostnameSafeID() {
+        let manager = RunnerManager(runnerID: "test-mac-auto-runner")
 
-        let runnerID = RunnerProject.makeRunnerID(for: projectURL, id: id)
-
-        XCTAssertEqual(runnerID.count, 63)
-        XCTAssertEqual(runnerID.suffix(7), "-abcdef")
-        XCTAssertFalse(runnerID.hasPrefix("-"))
-        XCTAssertFalse(runnerID.hasSuffix("-"))
-    }
-
-    func testEditableRunnerIDIsNormalizedAndHostnameSafe() {
-        let runnerID = RunnerProject.normalizedRunnerID("  Café_App Runner!!  ")
-
-        XCTAssertEqual(runnerID, "cafe-app-runner")
+        XCTAssertEqual(manager.runnerID, "test-mac-auto-runner")
+        XCTAssertEqual(manager.runningCount, 0)
     }
 
     func testProcessScannerFindsHeadlessAmpRunnersAndIgnoresOtherCommands() {
@@ -97,67 +88,6 @@ final class RunnerProjectTests: XCTestCase {
         )
 
         XCTAssertEqual(shell.path, "/bin/bash")
-    }
-
-    func testRunnerMatchingPrefersKnownPathOverCollidingRunnerID() {
-        let firstProject = RunnerProject(path: "/tmp/first", runnerID: "shared-runner")
-        let secondProject = RunnerProject(path: "/tmp/second", runnerID: "second-runner")
-        let runner = RunningRunner(
-            processIdentifier: 1746,
-            runnerID: "shared-runner",
-            path: "/tmp/second",
-            command: "amp --no-tui --runner-id shared-runner"
-        )
-        let projects = [firstProject, secondProject]
-
-        XCTAssertEqual(
-            RunnerMatcher.project(for: runner, among: projects, and: [runner]),
-            secondProject
-        )
-        XCTAssertEqual(
-            RunnerMatcher.runner(for: firstProject, among: projects, and: [runner]),
-            .conflict
-        )
-    }
-
-    func testRunnerIDOnlyMatchingRequiresOneRunnerAndOneProject() {
-        let project = RunnerProject(path: "/tmp/example", runnerID: "shared-runner")
-        let firstRunner = RunningRunner(
-            processIdentifier: 1746,
-            runnerID: "shared-runner",
-            path: nil,
-            command: "amp --no-tui --runner-id shared-runner"
-        )
-        let secondRunner = RunningRunner(
-            processIdentifier: 1747,
-            runnerID: "shared-runner",
-            path: nil,
-            command: "amp --no-tui --runner-id shared-runner"
-        )
-
-        XCTAssertEqual(
-            RunnerMatcher.runner(for: project, among: [project], and: [firstRunner]),
-            .matched(firstRunner)
-        )
-        XCTAssertEqual(
-            RunnerMatcher.project(for: firstRunner, among: [project], and: [firstRunner]),
-            project
-        )
-        XCTAssertEqual(
-            RunnerMatcher.runner(
-                for: project,
-                among: [project],
-                and: [firstRunner, secondRunner]
-            ),
-            .conflict
-        )
-        XCTAssertNil(
-            RunnerMatcher.project(
-                for: firstRunner,
-                among: [project],
-                and: [firstRunner, secondRunner]
-            )
-        )
     }
 
     func testTerminalFormatterConsumesANSIColorSequences() {
