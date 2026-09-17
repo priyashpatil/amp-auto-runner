@@ -42,7 +42,10 @@ final class ProjectStore: ObservableObject {
     }
 
     func setIsServed(_ isServed: Bool, for id: RunnerProject.ID) {
-        guard let index = projects.firstIndex(where: { $0.id == id }) else {
+        guard
+            let index = projects.firstIndex(where: { $0.id == id }),
+            projects[index].isServed != isServed
+        else {
             return
         }
 

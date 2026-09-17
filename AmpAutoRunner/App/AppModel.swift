@@ -139,6 +139,29 @@ final class AppModel: ObservableObject {
                 self?.startRunnerAfterInitialScan(hasCompletedInitialScan)
             }
             .store(in: &cancellables)
+
+        runners.$servedDirectoryPaths
+            .compactMap { $0 }
+            .sink { [weak self] servedDirectoryPaths in
+                self?.syncProjects(with: servedDirectoryPaths)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func syncProjects(with servedDirectoryPaths: Set<String>) {
+        for path in servedDirectoryPaths {
+            projects.add(
+                directoryURL: URL(fileURLWithPath: path, isDirectory: true),
+                isServed: true
+            )
+        }
+
+        for project in projects.projects where !pendingProjectIDs.contains(project.id) {
+            let normalizedPath = project.directoryURL.standardizedFileURL
+                .resolvingSymlinksInPath()
+                .path
+            projects.setIsServed(servedDirectoryPaths.contains(normalizedPath), for: project.id)
+        }
     }
 
     private func startRunnerAfterInitialScan(_ hasCompletedInitialScan: Bool) {
@@ -147,6 +170,9 @@ final class AppModel: ObservableObject {
         }
 
         didStartRunner = true
+        guard !runners.isRunning else {
+            return
+        }
         startRunner()
     }
 }

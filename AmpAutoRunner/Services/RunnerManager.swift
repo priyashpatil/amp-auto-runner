@@ -475,6 +475,7 @@ final class RunnerManager: ObservableObject {
     @Published private(set) var runningRunners: [RunningRunner] = []
     @Published private(set) var hasCompletedInitialScan = false
     @Published private(set) var errorMessage: String?
+    @Published private(set) var servedDirectoryPaths: Set<String>?
 
     let logs = RunnerLogStore()
     let runnerID: String
@@ -490,9 +491,7 @@ final class RunnerManager: ObservableObject {
     private let directoryQueue = DispatchQueue(label: "AmpAutoRunner.runner-directories", qos: .utility)
     private let ampExecutableURLOverride: URL?
     private let directoryCommandExecutor: RunnerDirectoryCommandExecutor
-    private var desiredDirectoryPaths: Set<String> = []
-    private var reconciledProcessIdentifier: Int32?
-    private var reconcilingProcessIdentifier: Int32?
+    private var refreshingDirectoriesProcessIdentifier: Int32?
 
     init(
         runnerID: String? = nil,
@@ -595,17 +594,15 @@ final class RunnerManager: ObservableObject {
         }
 
         if let matchingRunner = discoveredRunners.first(where: { $0.runnerID == runnerID }) {
-            if
-                matchingRunner.processIdentifier != reconciledProcessIdentifier,
-                matchingRunner.processIdentifier != reconcilingProcessIdentifier,
-                !desiredDirectoryPaths.isEmpty
-            {
-                reconcilingProcessIdentifier = matchingRunner.processIdentifier
-                reconcileDirectories(processIdentifier: matchingRunner.processIdentifier)
+            if matchingRunner.processIdentifier != refreshingDirectoriesProcessIdentifier {
+                refreshingDirectoriesProcessIdentifier = matchingRunner.processIdentifier
+                refreshServedDirectories(processIdentifier: matchingRunner.processIdentifier)
             }
         } else {
-            reconciledProcessIdentifier = nil
-            reconcilingProcessIdentifier = nil
+            refreshingDirectoriesProcessIdentifier = nil
+            if servedDirectoryPaths != nil {
+                servedDirectoryPaths = nil
+            }
         }
 
         if isInitialScan {
@@ -614,7 +611,6 @@ final class RunnerManager: ObservableObject {
     }
 
     func start(directories: [URL]) {
-        desiredDirectoryPaths = Set(directories.map(normalizedPath))
         guard process == nil else {
             return
         }
@@ -630,8 +626,10 @@ final class RunnerManager: ObservableObject {
             let processIdentifier = runningRunners
                 .first(where: { $0.runnerID == runnerID })?
                 .processIdentifier
-            reconcilingProcessIdentifier = processIdentifier
-            reconcileDirectories(processIdentifier: processIdentifier)
+            if processIdentifier != refreshingDirectoriesProcessIdentifier {
+                refreshingDirectoriesProcessIdentifier = processIdentifier
+                refreshServedDirectories(processIdentifier: processIdentifier)
+            }
             return
         }
         guard directories.allSatisfy({ isDirectory($0) }) else {
@@ -728,24 +726,14 @@ final class RunnerManager: ObservableObject {
         _ directory: URL,
         completion: @escaping (Bool) -> Void = { _ in }
     ) {
-        updateDirectory(directory, command: "add") { [weak self] succeeded in
-            if succeeded {
-                self?.desiredDirectoryPaths.insert(self?.normalizedPath(directory) ?? directory.path)
-            }
-            completion(succeeded)
-        }
+        updateDirectory(directory, command: "add", completion: completion)
     }
 
     func removeDirectory(
         _ directory: URL,
         completion: @escaping (Bool) -> Void = { _ in }
     ) {
-        updateDirectory(directory, command: "remove") { [weak self] succeeded in
-            if succeeded {
-                self?.desiredDirectoryPaths.remove(self?.normalizedPath(directory) ?? directory.path)
-            }
-            completion(succeeded)
-        }
+        updateDirectory(directory, command: "remove", completion: completion)
     }
 
     func clearError() {
@@ -840,10 +828,10 @@ final class RunnerManager: ObservableObject {
         }
     }
 
-    private func reconcileDirectories(processIdentifier: Int32?) {
+    private func refreshServedDirectories(processIdentifier: Int32?) {
         guard let ampExecutableURL = ampExecutableURL() else {
             reportCommandFailure("Amp CLI was not found.")
-            reconcilingProcessIdentifier = nil
+            refreshingDirectoriesProcessIdentifier = nil
             return
         }
 
@@ -853,9 +841,6 @@ final class RunnerManager: ObservableObject {
         directoryQueue.async { [weak self] in
             guard let self else {
                 return
-            }
-            let desiredDirectoryPaths = DispatchQueue.main.sync {
-                self.desiredDirectoryPaths
             }
             var listResult = executor.execute(
                 ampExecutableURL,
@@ -883,47 +868,19 @@ final class RunnerManager: ObservableObject {
                     detail = "Could not inspect served directories."
                 }
                 DispatchQueue.main.async {
-                    self.reconcilingProcessIdentifier = nil
+                    self.refreshingDirectoriesProcessIdentifier = nil
                     self.reportCommandFailure(detail)
                 }
                 return
             }
 
             let actualDirectoryPaths = Self.parseServedDirectoryPaths(output)
-            let removals = actualDirectoryPaths.subtracting(desiredDirectoryPaths).sorted()
-            let additions = desiredDirectoryPaths.subtracting(actualDirectoryPaths).sorted()
-
-            for path in removals {
-                let result = executor.execute(
-                    ampExecutableURL,
-                    ["runner", "dirs", "remove", path, "--runner-id", runnerID]
-                )
-                if case let .failure(detail) = result {
-                    DispatchQueue.main.async {
-                        self.reconcilingProcessIdentifier = nil
-                        self.reportCommandFailure(detail)
-                    }
-                    return
-                }
-            }
-
-            for path in additions {
-                let result = executor.execute(
-                    ampExecutableURL,
-                    ["runner", "dirs", "add", path, "--runner-id", runnerID]
-                )
-                if case let .failure(detail) = result {
-                    DispatchQueue.main.async {
-                        self.reconcilingProcessIdentifier = nil
-                        self.reportCommandFailure(detail)
-                    }
-                    return
-                }
-            }
-
             DispatchQueue.main.async {
-                self.reconcilingProcessIdentifier = nil
-                self.reconciledProcessIdentifier = processIdentifier
+                guard self.refreshingDirectoriesProcessIdentifier == processIdentifier else {
+                    return
+                }
+                self.refreshingDirectoriesProcessIdentifier = nil
+                self.servedDirectoryPaths = actualDirectoryPaths
             }
         }
     }
@@ -958,10 +915,6 @@ final class RunnerManager: ObservableObject {
         let detail = message.isEmpty ? "Could not update served directories." : message
         errorMessage = detail
         logs.append(Data("[Amp Auto Runner] \(detail)\n".utf8))
-    }
-
-    private func normalizedPath(_ url: URL) -> String {
-        Self.normalizedPath(url)
     }
 
     nonisolated private static func normalizedPath(_ url: URL) -> String {

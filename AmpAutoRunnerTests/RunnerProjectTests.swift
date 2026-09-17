@@ -96,7 +96,7 @@ final class RunnerProjectTests: XCTestCase {
     }
 
     @MainActor
-    func testReconciliationWaitsForPendingDirectoryAdd() async throws {
+    func testDirectoryRefreshWaitsForPendingDirectoryAdd() async throws {
         let anchorPath = "/tmp/anchor-project"
         let addedPath = "/tmp/added-project"
         let addStarted = expectation(description: "Directory add started")
@@ -179,7 +179,7 @@ final class RunnerProjectTests: XCTestCase {
     }
 
     @MainActor
-    func testFailedReconciliationRetriesForTheSameRunnerProcess() async throws {
+    func testFailedDirectoryRefreshRetriesForTheSameRunnerProcess() async throws {
         let desiredPath = "/tmp/desired-project"
         let firstAttempt = expectation(description: "First reconciliation attempted")
         let secondAttempt = expectation(description: "Reconciliation retried")

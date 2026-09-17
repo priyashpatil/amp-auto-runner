@@ -33,6 +33,7 @@ becomes the new per-directory **Served** setting.
 - One resizable window that restores its last size and screen position
 - One machine-specific runner serving every enabled directory
 - Live directory addition and removal through `amp runner dirs`
+- Automatic import of directory changes made to the shared runner through the CLI
 - Compact directory table with persisted Served controls
 - Global start and stop controls for the shared runner
 - Automatic migration from the former per-project runner configuration

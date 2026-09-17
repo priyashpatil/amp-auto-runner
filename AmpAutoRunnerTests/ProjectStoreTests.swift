@@ -125,6 +125,49 @@ final class ProjectStoreTests: XCTestCase {
         withExtendedLifetime(model) {}
     }
 
+    func testInitialScanImportsCLIProjectIntoEmptyStoreWithoutStoppingRunner() async throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = ProjectStore(defaults: defaults)
+        let directory = URL(fileURLWithPath: "/tmp/cli-project", isDirectory: true)
+        let directoryListed = expectation(description: "CLI directory listed")
+        let runners = RunnerManager(
+            runnerID: "test-runner",
+            ampExecutableURL: URL(fileURLWithPath: "/usr/bin/true"),
+            directoryCommandExecutor: RunnerDirectoryCommandExecutor { _, arguments in
+                guard arguments.contains("list") else {
+                    return .failure("Unexpected command: \(arguments)")
+                }
+                directoryListed.fulfill()
+                return .success("Runner test-runner serves 1 directory:\n  \(directory.path)")
+            }
+        )
+        let model = AppModel(
+            projects: store,
+            runners: runners,
+            launchAtLogin: LaunchAtLoginController()
+        )
+
+        runners.applyScanResult([
+            RunningRunner(
+                processIdentifier: 2_000_000_000,
+                runnerID: runners.runnerID,
+                path: directory.path,
+                command: "amp --no-tui --runner-id test-runner"
+            ),
+        ])
+
+        await fulfillment(of: [directoryListed], timeout: 2)
+        for _ in 0..<20 where store.projects.isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertEqual(store.projects.map(\.path), [directory.path])
+        XCTAssertTrue(try XCTUnwrap(store.projects.first).isServed)
+        XCTAssertEqual(runners.state, .running)
+        withExtendedLifetime(model) {}
+    }
+
     func testFailedLiveRemovalKeepsProjectServedAndReportsTheError() async throws {
         let (defaults, suiteName) = try makeDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -274,28 +317,36 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertEqual(runners.errorMessage, "Add failed")
     }
 
-    func testInitialScanReconcilesPersistedRunnerDirectories() async throws {
+    func testRunnerDirectoryScansImportCLIChanges() async throws {
         let (defaults, suiteName) = try makeDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let store = ProjectStore(defaults: defaults)
         let desiredDirectory = URL(fileURLWithPath: "/tmp/desired project", isDirectory: true)
-        let extraDirectory = URL(fileURLWithPath: "/tmp/old project", isDirectory: true)
+        let importedDirectory = URL(fileURLWithPath: "/tmp/imported project", isDirectory: true)
+        let laterDirectory = URL(fileURLWithPath: "/tmp/later project", isDirectory: true)
         store.add(directoryURL: desiredDirectory)
-        let extraRemoved = expectation(description: "Persisted extra directory removed")
+        let firstList = expectation(description: "Initial CLI directories listed")
+        let secondList = expectation(description: "Updated CLI directories listed")
+        let lock = NSLock()
+        var actualPaths = [desiredDirectory.path, importedDirectory.path]
+        var listCount = 0
         let runners = RunnerManager(
             runnerID: "test-runner",
             ampExecutableURL: URL(fileURLWithPath: "/usr/bin/true"),
             directoryCommandExecutor: RunnerDirectoryCommandExecutor { _, arguments in
                 if arguments.contains("list") {
-                    return .success(
-                        "Runner test-runner serves 2 directories:\n"
-                            + "  \(desiredDirectory.path)\n"
-                            + "  \(extraDirectory.path)"
-                    )
-                }
-                if arguments.contains("remove"), arguments.contains(extraDirectory.path) {
-                    extraRemoved.fulfill()
-                    return .success("")
+                    return lock.withLock {
+                        listCount += 1
+                        if listCount == 1 {
+                            firstList.fulfill()
+                        } else {
+                            secondList.fulfill()
+                        }
+                        let paths = actualPaths.map { "  \($0)" }.joined(separator: "\n")
+                        return .success(
+                            "Runner test-runner serves \(actualPaths.count) directories:\n\(paths)"
+                        )
+                    }
                 }
                 return .failure("Unexpected command: \(arguments)")
             }
@@ -315,7 +366,36 @@ final class ProjectStoreTests: XCTestCase {
             ),
         ])
 
-        await fulfillment(of: [extraRemoved], timeout: 2)
+        await fulfillment(of: [firstList], timeout: 2)
+        for _ in 0..<20 where !store.projects.contains(where: { $0.path == importedDirectory.path }) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertTrue(store.projects.contains {
+            $0.path == importedDirectory.path && $0.isServed
+        })
+
+        lock.withLock {
+            actualPaths = [importedDirectory.path, laterDirectory.path]
+        }
+        runners.applyScanResult([
+            RunningRunner(
+                processIdentifier: 1234,
+                runnerID: runners.runnerID,
+                path: importedDirectory.path,
+                command: "amp --no-tui --runner-id test-runner"
+            ),
+        ])
+
+        await fulfillment(of: [secondList], timeout: 2)
+        for _ in 0..<20 where !store.projects.contains(where: { $0.path == laterDirectory.path }) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertFalse(try XCTUnwrap(store.projects.first { $0.path == desiredDirectory.path }).isServed)
+        XCTAssertTrue(store.projects.contains {
+            $0.path == laterDirectory.path && $0.isServed
+        })
         withExtendedLifetime(model) {}
     }
 
