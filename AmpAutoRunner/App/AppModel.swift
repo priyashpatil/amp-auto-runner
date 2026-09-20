@@ -7,18 +7,19 @@ final class AppModel: ObservableObject {
     let runners: RunnerManager
     let launchAtLogin: LaunchAtLoginController
 
-    @Published private(set) var showsRunnerList = true
     @Published private(set) var showsRunnerLogs = true
+    @Published private(set) var pendingProjectIDs: Set<UUID> = []
 
     private var didStartMonitoring = false
-    private var didAutoStartProjects = false
+    private var didStartRunner = false
     private var cancellables: Set<AnyCancellable> = []
 
     init() {
         projects = ProjectStore()
         runners = RunnerManager()
         launchAtLogin = LaunchAtLoginController()
-        observeRunningRunners()
+        migrateStoredProjectPaths()
+        observeRunnerScan()
     }
 
     init(
@@ -29,7 +30,8 @@ final class AppModel: ObservableObject {
         self.projects = projects
         self.runners = runners
         self.launchAtLogin = launchAtLogin
-        observeRunningRunners()
+        migrateStoredProjectPaths()
+        observeRunnerScan()
     }
 
     func applicationDidFinishLaunching() {
@@ -41,128 +43,156 @@ final class AppModel: ObservableObject {
         runners.startMonitoring()
     }
 
-    func toggleRunnerList() {
-        setRunnerListVisible(!showsRunnerList)
-    }
-
-    func setRunnerListVisible(_ isVisible: Bool) {
-        if !isVisible, !showsRunnerLogs {
-            showsRunnerLogs = true
-        }
-        showsRunnerList = isVisible
-    }
-
     func toggleRunnerLogs() {
         setRunnerLogsVisible(!showsRunnerLogs)
     }
 
     func setRunnerLogsVisible(_ isVisible: Bool) {
-        if !isVisible, !showsRunnerList {
-            showsRunnerList = true
-        }
         showsRunnerLogs = isVisible
-    }
-
-    func setAutoStarts(_ autoStarts: Bool, for project: RunnerProject) {
-        projects.setStartsAutomatically(autoStarts, for: project.id)
-    }
-
-    func autoStarts(_ runner: RunningRunner) -> Bool {
-        project(for: runner)?.startsAutomatically == true
-    }
-
-    func isManaged(_ runner: RunningRunner) -> Bool {
-        project(for: runner) != nil
     }
 
     @discardableResult
     func addProject(directoryURL: URL) -> RunnerProject {
-        let project = projects.add(directoryURL: directoryURL)
-        projects.setStartsAutomatically(true, for: project.id)
-        migrateOrStart(project)
-        return project
-    }
-
-    func setAutoStarts(_ autoStarts: Bool, for runner: RunningRunner) {
-        if autoStarts {
-            guard let directoryURL = runner.directoryURL else {
-                return
+        let project = projects.add(
+            directoryURL: directoryURL,
+            isServed: !runners.isRunning
+        )
+        guard !pendingProjectIDs.contains(project.id) else {
+            return project
+        }
+        if runners.isRunning {
+            guard !project.isServed else {
+                return project
             }
-
-            let project = projects.add(directoryURL: directoryURL, runnerID: runner.runnerID)
-            projects.setStartsAutomatically(true, for: project.id)
-            runners.migrate(runner, to: project)
-            return
+            pendingProjectIDs.insert(project.id)
+            runners.addDirectory(project.directoryURL) { [weak self] succeeded in
+                self?.pendingProjectIDs.remove(project.id)
+                if succeeded {
+                    self?.projects.setIsServed(true, for: project.id)
+                }
+            }
+        } else {
+            projects.setIsServed(true, for: project.id)
+            startRunner()
         }
-
-        guard let project = project(for: runner) else {
-            return
-        }
-        projects.setStartsAutomatically(false, for: project.id)
+        return projects.projects.first(where: { $0.id == project.id }) ?? project
     }
 
-    @discardableResult
-    func setRunnerID(_ runnerID: String, for project: RunnerProject) -> String {
-        guard
-            runners.runningRunner(for: project) == nil,
-            runners.state(for: project) != .starting,
-            runners.state(for: project) != .stopping
-        else {
-            return project.runnerID
+    func setIsServed(_ isServed: Bool, for project: RunnerProject) {
+        guard project.isServed != isServed else {
+            return
         }
-
-        return projects.setRunnerID(runnerID, for: project.id) ?? project.runnerID
+        guard !pendingProjectIDs.contains(project.id) else {
+            return
+        }
+        if runners.isRunning {
+            pendingProjectIDs.insert(project.id)
+            let updateStore: (Bool) -> Void = { [weak self] succeeded in
+                self?.pendingProjectIDs.remove(project.id)
+                if succeeded {
+                    self?.projects.setIsServed(isServed, for: project.id)
+                }
+            }
+            if isServed {
+                runners.addDirectory(project.directoryURL, completion: updateStore)
+            } else {
+                runners.removeDirectory(project.directoryURL, completion: updateStore)
+            }
+        } else {
+            projects.setIsServed(isServed, for: project.id)
+            if isServed {
+                startRunner()
+            }
+        }
     }
 
-    func stop(_ runner: RunningRunner) {
-        runners.stop(runner)
+    func startRunner() {
+        runners.start(directories: servedDirectories)
+    }
+
+    func stopRunner() {
+        runners.stop()
     }
 
     func remove(_ project: RunnerProject) {
-        runners.stop(projectID: project.id)
-        projects.remove(id: project.id)
+        guard !pendingProjectIDs.contains(project.id) else {
+            return
+        }
+        if project.isServed, runners.isRunning {
+            pendingProjectIDs.insert(project.id)
+            runners.removeDirectory(project.directoryURL) { [weak self] succeeded in
+                self?.pendingProjectIDs.remove(project.id)
+                if succeeded {
+                    self?.projects.remove(id: project.id)
+                }
+            }
+        } else {
+            projects.remove(id: project.id)
+        }
     }
 
-    private func observeRunningRunners() {
-        runners.$runningRunners
-            .sink { [weak self] _ in
-                self?.autoStartSavedProjects()
+    private var servedDirectories: [URL] {
+        projects.projects.filter(\.isServed).map(\.directoryURL)
+    }
+
+    private func observeRunnerScan() {
+        runners.$hasCompletedInitialScan
+            .sink { [weak self] hasCompletedInitialScan in
+                self?.startRunnerAfterInitialScan(hasCompletedInitialScan)
+            }
+            .store(in: &cancellables)
+
+        runners.$servedDirectoryPaths
+            .compactMap { $0 }
+            .sink { [weak self] servedDirectoryPaths in
+                self?.syncProjects(with: servedDirectoryPaths)
             }
             .store(in: &cancellables)
     }
 
-    private func autoStartSavedProjects() {
-        guard runners.hasCompletedInitialScan, !didAutoStartProjects else {
-            return
+    private func syncProjects(with servedDirectoryPaths: Set<String>) {
+        for path in servedDirectoryPaths {
+            projects.add(
+                directoryURL: URL(fileURLWithPath: path, isDirectory: true),
+                isServed: true
+            )
         }
 
-        didAutoStartProjects = true
-        for project in projects.projects where project.startsAutomatically {
-            runners.start(project, automatically: true)
+        for project in projects.projects where !pendingProjectIDs.contains(project.id) {
+            let normalizedPath = project.directoryURL.standardizedFileURL
+                .resolvingSymlinksInPath()
+                .path
+            projects.setIsServed(servedDirectoryPaths.contains(normalizedPath), for: project.id)
         }
     }
 
-    private func migrateOrStart(_ project: RunnerProject) {
-        let match = RunnerMatcher.runner(
-            for: project,
-            among: projects.projects,
-            and: runners.runningRunners
-        )
-        if case let .matched(runningRunner) = match {
-            if !runners.isOwned(runningRunner) {
-                runners.migrate(runningRunner, to: project)
+    private func migrateStoredProjectPaths() {
+        for project in projects.projects {
+            let path = RunnerManager.pathWithoutMetadata(project.path)
+            guard path != project.path else {
+                continue
             }
+
+            let canonicalProject = projects.add(
+                directoryURL: URL(fileURLWithPath: path, isDirectory: true),
+                isServed: project.isServed
+            )
+            if project.isServed {
+                projects.setIsServed(true, for: canonicalProject.id)
+            }
+            projects.remove(id: project.id)
+        }
+    }
+
+    private func startRunnerAfterInitialScan(_ hasCompletedInitialScan: Bool) {
+        guard hasCompletedInitialScan, !didStartRunner else {
             return
         }
 
-        runners.start(project)
-    }
-
-    func project(for runner: RunningRunner) -> RunnerProject? {
-        RunnerMatcher.project(
-            for: runner,
-            among: projects.projects,
-            and: runners.runningRunners
-        )
+        didStartRunner = true
+        guard !runners.isRunning else {
+            return
+        }
+        startRunner()
     }
 }

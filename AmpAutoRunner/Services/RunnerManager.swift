@@ -34,77 +34,41 @@ enum RunnerState: Equatable {
     case failed(String)
 }
 
-enum RunnerMatch: Equatable {
-    case none
-    case matched(RunningRunner)
-    case conflict
+enum RunnerDirectoryCommandResult: Equatable {
+    case success(String)
+    case failure(String)
 }
 
-enum RunnerMatcher {
-    static func runner(
-        for project: RunnerProject,
-        among projects: [RunnerProject],
-        and runners: [RunningRunner]
-    ) -> RunnerMatch {
-        let pathMatches = runners.filter { $0.path == project.path }
-        if pathMatches.count == 1, let runner = pathMatches.first {
-            return .matched(runner)
-        }
-        if pathMatches.count > 1 {
-            let runnerIDMatches = pathMatches.filter { $0.runnerID == project.runnerID }
-            if runnerIDMatches.count == 1, let runner = runnerIDMatches.first {
-                return .matched(runner)
+struct RunnerDirectoryCommandExecutor {
+    let execute: (URL, [String]) -> RunnerDirectoryCommandResult
+
+    static let live = RunnerDirectoryCommandExecutor { executableURL, arguments in
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = arguments
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let output = String(
+                decoding: outputPipe.fileHandleForReading.readDataToEndOfFile(),
+                as: UTF8.self
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            let error = String(
+                decoding: errorPipe.fileHandleForReading.readDataToEndOfFile(),
+                as: UTF8.self
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard process.terminationStatus == 0 else {
+                return .failure(error.isEmpty ? output : error)
             }
-            return .conflict
+            return .success(output)
+        } catch {
+            return .failure(error.localizedDescription)
         }
-
-        guard projects.filter({ $0.runnerID == project.runnerID }).count == 1 else {
-            return .conflict
-        }
-
-        let runnerIDMatches = runners.filter { $0.runnerID == project.runnerID }
-        guard !runnerIDMatches.isEmpty else {
-            return .none
-        }
-        guard
-            runnerIDMatches.count == 1,
-            runnerIDMatches.first?.path == nil,
-            let runner = runnerIDMatches.first
-        else {
-            return .conflict
-        }
-        return .matched(runner)
-    }
-
-    static func project(
-        for runner: RunningRunner,
-        among projects: [RunnerProject],
-        and runners: [RunningRunner]
-    ) -> RunnerProject? {
-        if let path = runner.path {
-            let pathMatches = projects.filter { $0.path == path }
-            if pathMatches.count == 1 {
-                return pathMatches.first
-            }
-            if pathMatches.count > 1 {
-                let runnerIDMatches = pathMatches.filter { $0.runnerID == runner.runnerID }
-                return runnerIDMatches.count == 1 ? runnerIDMatches.first : nil
-            }
-            return nil
-        }
-
-        let projectMatches = projects.filter { $0.runnerID == runner.runnerID }
-        let runnerMatches = runners.filter {
-            $0.path == nil && $0.runnerID == runner.runnerID
-        }
-        guard
-            projectMatches.count == 1,
-            runnerMatches.count == 1,
-            runnerMatches.first?.processIdentifier == runner.processIdentifier
-        else {
-            return nil
-        }
-        return projectMatches.first
     }
 }
 
@@ -450,7 +414,7 @@ enum RunnerProcessScanner {
     private static func inferredRunnerID(processIdentifier: Int32, path: String?) -> String {
         if
             let path,
-            let runnerID = RunnerProject.normalizedRunnerID(
+            let runnerID = normalizedRunnerID(
                 URL(fileURLWithPath: path, isDirectory: true).lastPathComponent
             )
         {
@@ -458,6 +422,21 @@ enum RunnerProcessScanner {
         }
 
         return "amp-runner-\(processIdentifier)"
+    }
+
+    private static func normalizedRunnerID(_ value: String) -> String? {
+        let normalized = value.lowercased().unicodeScalars.map { scalar -> Character in
+            switch scalar.value {
+            case 48...57, 97...122:
+                return Character(String(scalar))
+            default:
+                return "-"
+            }
+        }
+        let result = String(normalized)
+            .split(separator: "-", omittingEmptySubsequences: true)
+            .joined(separator: "-")
+        return result.isEmpty ? nil : result
     }
 
     private static func cleanArgument(_ argument: Substring) -> String {
@@ -492,30 +471,85 @@ enum RunnerProcessScanner {
 
 @MainActor
 final class RunnerManager: ObservableObject {
-    @Published private(set) var states: [RunnerProject.ID: RunnerState] = [:]
+    @Published private(set) var state: RunnerState = .stopped
     @Published private(set) var runningRunners: [RunningRunner] = []
     @Published private(set) var hasCompletedInitialScan = false
+    @Published private(set) var errorMessage: String?
+    @Published private(set) var servedDirectoryPaths: Set<String>?
 
     let logs = RunnerLogStore()
+    let runnerID: String
 
-    private var processes: [RunnerProject.ID: Process] = [:]
-    private var terminals: [RunnerProject.ID: RunnerTerminal] = [:]
+    private var process: Process?
+    private var terminal: RunnerTerminal?
     private let outputArchive = RunnerOutputArchive()
-    private var projectIDsByProcessIdentifier: [Int32: RunnerProject.ID] = [:]
-    private var migrationTasks: [RunnerProject.ID: Task<Void, Never>] = [:]
-    private var migratingProcessIdentifiers: [RunnerProject.ID: Int32] = [:]
-    private var stoppingProjects: Set<RunnerProject.ID> = []
-    private var lastStartAttempts: [RunnerProject.ID: Date] = [:]
+    private let outputID = UUID()
+    private var isStopping = false
     private var scanTimer: Timer?
     private var scanInProgress = false
     private let scannerQueue = DispatchQueue(label: "AmpAutoRunner.runner-scanner", qos: .utility)
+    private let directoryQueue = DispatchQueue(label: "AmpAutoRunner.runner-directories", qos: .utility)
+    private let ampExecutableURLOverride: URL?
+    private let directoryCommandExecutor: RunnerDirectoryCommandExecutor
+    private let runnerRootDirectoryURL: URL
+    private var refreshingDirectoriesProcessIdentifier: Int32?
+    private var isAttachingInitialDirectories = false
+
+    init(
+        runnerID: String? = nil,
+        ampExecutableURL: URL? = nil,
+        directoryCommandExecutor: RunnerDirectoryCommandExecutor = .live,
+        runnerRootDirectoryURL: URL? = nil
+    ) {
+        self.runnerID = runnerID ?? RunnerManager.defaultRunnerID
+        ampExecutableURLOverride = ampExecutableURL
+        self.directoryCommandExecutor = directoryCommandExecutor
+        self.runnerRootDirectoryURL = runnerRootDirectoryURL
+            ?? Self.defaultRunnerRootDirectoryURL
+    }
+
+    private static var defaultRunnerRootDirectoryURL: URL {
+        let applicationSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? FileManager.default.homeDirectoryForCurrentUser
+        let bundleIdentifier = Bundle.main.bundleIdentifier ?? "com.priyashpatil.AmpAutoRunner"
+        return applicationSupport
+            .appendingPathComponent(bundleIdentifier, isDirectory: true)
+            .appendingPathComponent("Runner Root", isDirectory: true)
+    }
+
+    static var defaultRunnerID: String {
+        let host = ProcessInfo.processInfo.hostName.split(separator: ".").first.map(String.init)
+            ?? "mac"
+        let normalized = host.lowercased().unicodeScalars.map { scalar -> Character in
+            switch scalar.value {
+            case 48...57, 97...122:
+                return Character(String(scalar))
+            default:
+                return "-"
+            }
+        }
+        let name = String(normalized)
+            .split(separator: "-", omittingEmptySubsequences: true)
+            .joined(separator: "-")
+#if DEBUG
+        let suffix = "-auto-runner-debug"
+#else
+        let suffix = "-auto-runner"
+#endif
+        let maximumNameLength = 63 - suffix.count
+        let shortenedName = (name.isEmpty ? "mac" : name).prefix(maximumNameLength)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return "\(shortenedName)\(suffix)"
+    }
+
+    var isRunning: Bool {
+        process?.isRunning == true || runningRunners.contains { $0.runnerID == runnerID }
+    }
 
     var runningCount: Int {
-        var processIdentifiers = Set(runningRunners.map(\.processIdentifier))
-        for process in processes.values where process.isRunning {
-            processIdentifiers.insert(process.processIdentifier)
-        }
-        return processIdentifiers.count
+        isRunning ? 1 : 0
     }
 
     func startMonitoring() {
@@ -559,90 +593,90 @@ final class RunnerManager: ObservableObject {
 
     func applyScanResult(_ discoveredRunners: [RunningRunner]) {
         let isInitialScan = !hasCompletedInitialScan
-        if isInitialScan {
-            hasCompletedInitialScan = true
-        }
         if isInitialScan || runningRunners != discoveredRunners {
             runningRunners = discoveredRunners
         }
-    }
-
-    func state(for project: RunnerProject) -> RunnerState {
-        if let state = states[project.id], state == .starting || state == .stopping {
-            return state
-        }
-
-        if runningRunner(for: project) != nil || processes[project.id]?.isRunning == true {
-            return .running
-        }
-
-        return states[project.id] ?? .stopped
-    }
-
-    func runningRunner(for project: RunnerProject) -> RunningRunner? {
-        guard case let .matched(runner) = RunnerMatcher.runner(
-            for: project,
-            among: [project],
-            and: runningRunners
-        ) else {
-            return nil
-        }
-        return runner
-    }
-
-    func isOwned(_ runner: RunningRunner) -> Bool {
-        projectIDsByProcessIdentifier[runner.processIdentifier] != nil
-    }
-
-    func start(_ project: RunnerProject, automatically: Bool = false) {
-        guard processes[project.id] == nil else {
-            return
-        }
-
-        switch RunnerMatcher.runner(for: project, among: [project], and: runningRunners) {
-        case .matched:
-            states[project.id] = .stopped
-            return
-        case .conflict:
-            states[project.id] = .failed(
-                "Runner identity conflicts with another running Amp process."
-            )
-            return
-        case .none:
-            break
+        if process?.isRunning != true {
+            let matchingRunner = discoveredRunners.first { $0.runnerID == runnerID }
+            if state == .stopping {
+                if matchingRunner == nil {
+                    state = .stopped
+                }
+            } else if matchingRunner != nil {
+                state = .running
+            } else if state == .running {
+                state = .stopped
+            }
         }
 
         if
-            automatically,
-            let lastStartAttempt = lastStartAttempts[project.id],
-            Date().timeIntervalSince(lastStartAttempt) < 10
+            !isAttachingInitialDirectories,
+            let matchingRunner = discoveredRunners.first(where: { $0.runnerID == runnerID })
         {
-            return
-        }
-        lastStartAttempts[project.id] = Date()
-
-        var isDirectory: ObjCBool = false
-        guard
-            FileManager.default.fileExists(atPath: project.path, isDirectory: &isDirectory),
-            isDirectory.boolValue
-        else {
-            states[project.id] = .failed("Project directory no longer exists.")
-            return
+            if matchingRunner.processIdentifier != refreshingDirectoriesProcessIdentifier {
+                refreshingDirectoriesProcessIdentifier = matchingRunner.processIdentifier
+                refreshServedDirectories(processIdentifier: matchingRunner.processIdentifier)
+            }
+        } else {
+            refreshingDirectoriesProcessIdentifier = nil
+            if servedDirectoryPaths != nil {
+                servedDirectoryPaths = nil
+            }
         }
 
-        guard let ampExecutableURL = locateAmpExecutable() else {
-            states[project.id] = .failed(
-                "Amp CLI was not found. Install Amp in ~/.local/bin or a standard Homebrew location."
+        if isInitialScan {
+            hasCompletedInitialScan = true
+        }
+    }
+
+    func start(directories: [URL]) {
+        guard process == nil else {
+            return
+        }
+        guard !directories.isEmpty else {
+            if isRunning {
+                stop()
+            } else {
+                state = .stopped
+            }
+            return
+        }
+        guard !isRunning else {
+            let processIdentifier = runningRunners
+                .first(where: { $0.runnerID == runnerID })?
+                .processIdentifier
+            if processIdentifier != refreshingDirectoriesProcessIdentifier {
+                refreshingDirectoriesProcessIdentifier = processIdentifier
+                refreshServedDirectories(processIdentifier: processIdentifier)
+            }
+            return
+        }
+        guard directories.allSatisfy({ isDirectory($0) }) else {
+            fail("One or more served directories no longer exist.")
+            return
+        }
+
+        guard let ampExecutableURL = ampExecutableURL() else {
+            fail("Amp CLI was not found. Install Amp in ~/.local/bin or a standard Homebrew location.")
+            return
+        }
+        do {
+            try FileManager.default.createDirectory(
+                at: runnerRootDirectoryURL,
+                withIntermediateDirectories: true
             )
+        } catch {
+            fail("Could not prepare the shared runner: \(error.localizedDescription)")
             return
         }
 
-        states[project.id] = .starting
-        outputArchive.reset(projectID: project.id)
+        errorMessage = nil
+        state = .starting
+        outputArchive.reset(projectID: outputID)
 
         guard let terminal = makePseudoTerminal() else {
-            _ = outputArchive.take(projectID: project.id)
-            states[project.id] = .failed("Could not create a terminal for Amp.")
+            _ = outputArchive.take(projectID: outputID)
+            fail("Could not create a terminal for Amp.")
             return
         }
 
@@ -650,16 +684,17 @@ final class RunnerManager: ObservableObject {
         let loginShellURL = RunnerEnvironment.loginShellURL(inheritedEnvironment: environment)
         let process = Process()
         process.executableURL = loginShellURL
-        process.arguments = [
+        let arguments = [
             "-l", "-i", "-c",
             "export TERM=xterm-256color COLORTERM=truecolor FORCE_COLOR=3; unset NO_COLOR; exec \"$@\"",
             loginShellURL.lastPathComponent,
             ampExecutableURL.path,
             "--no-tui",
-            "--runner-id", project.runnerID,
+            "--runner-id", runnerID,
             "--remote-control-terminal",
         ]
-        process.currentDirectoryURL = project.directoryURL
+        process.arguments = arguments
+        process.currentDirectoryURL = runnerRootDirectoryURL
         process.standardOutput = terminal.slave
         process.standardError = terminal.slave
         process.standardInput = FileHandle.nullDevice
@@ -677,166 +712,318 @@ final class RunnerManager: ObservableObject {
 
         let logs = logs
         let outputArchive = outputArchive
+        let outputID = outputID
         terminal.master.readabilityHandler = { handle in
             let data = handle.availableData
             guard !data.isEmpty else {
                 return
             }
 
-            outputArchive.append(data, projectID: project.id)
+            outputArchive.append(data, projectID: outputID)
             logs.append(data)
         }
 
         process.terminationHandler = { [weak self] terminatedProcess in
             DispatchQueue.main.async {
-                self?.processDidTerminate(terminatedProcess, projectID: project.id)
+                self?.processDidTerminate(terminatedProcess)
             }
         }
 
-        processes[project.id] = process
-        terminals[project.id] = terminal
+        self.process = process
+        self.terminal = terminal
 
         do {
+            isAttachingInitialDirectories = true
             try process.run()
-            projectIDsByProcessIdentifier[process.processIdentifier] = project.id
-            states[project.id] = .running
+            attachInitialDirectories(
+                directories,
+                executableURL: ampExecutableURL,
+                process: process
+            )
             refreshRunningRunners()
         } catch {
+            isAttachingInitialDirectories = false
             terminal.master.readabilityHandler = nil
             terminal.master.closeFile()
             terminal.slave.closeFile()
-            processes[project.id] = nil
-            terminals[project.id] = nil
-            _ = outputArchive.take(projectID: project.id)
-            states[project.id] = .failed(error.localizedDescription)
+            self.process = nil
+            self.terminal = nil
+            _ = outputArchive.take(projectID: outputID)
+            fail(error.localizedDescription)
         }
     }
 
-    func migrate(_ runner: RunningRunner, to project: RunnerProject) {
-        guard !isOwned(runner), migrationTasks[project.id] == nil else {
-            return
-        }
-
-        states[project.id] = .starting
-        migratingProcessIdentifiers[project.id] = runner.processIdentifier
-
-        guard Darwin.kill(runner.processIdentifier, SIGTERM) == 0 else {
-            if errno == ESRCH {
-                completeMigration(of: runner, to: project)
-            } else {
-                migratingProcessIdentifiers[project.id] = nil
-                states[project.id] = .failed("Could not stop the existing Amp runner.")
-            }
-            return
-        }
-
-        migrationTasks[project.id] = Task { @MainActor [weak self] in
-            guard let self else {
-                return
-            }
-
-            for _ in 0..<50 {
-                guard !Task.isCancelled else {
-                    return
-                }
-                if !processExists(runner.processIdentifier) {
-                    completeMigration(of: runner, to: project)
-                    return
-                }
-                try? await Task.sleep(for: .milliseconds(100))
-            }
-
-            guard !Task.isCancelled else {
-                return
-            }
-            migrationTasks[project.id] = nil
-            migratingProcessIdentifiers[project.id] = nil
-            states[project.id] = .failed("The existing Amp runner did not stop.")
-        }
+    func addDirectory(
+        _ directory: URL,
+        completion: @escaping (Bool) -> Void = { _ in }
+    ) {
+        updateDirectory(directory, command: "add", completion: completion)
     }
 
-    func stop(projectID: RunnerProject.ID) {
-        if let migrationTask = migrationTasks.removeValue(forKey: projectID) {
-            migrationTask.cancel()
-            migratingProcessIdentifiers[projectID] = nil
-            states[projectID] = .stopped
-            return
-        }
-
-        guard let process = processes[projectID], process.isRunning else {
-            states[projectID] = .stopped
-            return
-        }
-
-        stoppingProjects.insert(projectID)
-        states[projectID] = .stopping
-        process.terminate()
+    func removeDirectory(
+        _ directory: URL,
+        completion: @escaping (Bool) -> Void = { _ in }
+    ) {
+        updateDirectory(directory, command: "remove", completion: completion)
     }
 
-    func stop(_ runner: RunningRunner) {
-        guard let projectID = projectIDsByProcessIdentifier[runner.processIdentifier] else {
+    func clearError() {
+        errorMessage = nil
+    }
+
+    func stop() {
+        if let process, process.isRunning {
+            isStopping = true
+            state = .stopping
+            process.terminate()
             return
         }
-        stop(projectID: projectID)
+        guard let runner = runningRunners.first(where: { $0.runnerID == runnerID }) else {
+            state = .stopped
+            return
+        }
+        if Darwin.kill(runner.processIdentifier, SIGTERM) == 0 {
+            state = .stopping
+        } else {
+            fail("Could not stop the Amp runner.")
+        }
     }
 
     func stopAll() {
-        for migrationTask in migrationTasks.values {
-            migrationTask.cancel()
-        }
-        migrationTasks.removeAll()
-        migratingProcessIdentifiers.removeAll()
-
-        for (projectID, process) in processes where process.isRunning {
-            stoppingProjects.insert(projectID)
+        if let process, process.isRunning {
+            isStopping = true
             process.terminate()
         }
     }
 
-    private func processDidTerminate(_ process: Process, projectID: RunnerProject.ID) {
-        guard processes[projectID] === process else {
+    private func processDidTerminate(_ terminatedProcess: Process) {
+        guard process === terminatedProcess else {
             return
         }
 
-        terminals[projectID]?.master.readabilityHandler = nil
-        terminals[projectID]?.master.closeFile()
-        terminals[projectID]?.slave.closeFile()
-        terminals[projectID] = nil
-        processes[projectID] = nil
-        projectIDsByProcessIdentifier[process.processIdentifier] = nil
-        let capturedOutput = outputArchive.take(projectID: projectID)
+        isAttachingInitialDirectories = false
+        terminal?.master.readabilityHandler = nil
+        terminal?.master.closeFile()
+        terminal?.slave.closeFile()
+        terminal = nil
+        process = nil
+        let capturedOutput = outputArchive.take(projectID: outputID)
 
-        if stoppingProjects.remove(projectID) != nil || process.terminationStatus == 0 {
-            states[projectID] = .stopped
+        if isStopping || terminatedProcess.terminationStatus == 0 {
+            state = .stopped
         } else {
             let output = capturedOutput.map {
                 String(decoding: $0, as: UTF8.self)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
             }
             let detail = output.flatMap { $0.isEmpty ? nil : $0 }
-                ?? "Amp exited with status \(process.terminationStatus)."
-            states[projectID] = .failed(detail)
+                ?? "Amp exited with status \(terminatedProcess.terminationStatus)."
+            fail(detail)
         }
 
+        isStopping = false
         refreshRunningRunners()
     }
 
-    private func completeMigration(of runner: RunningRunner, to project: RunnerProject) {
-        guard migratingProcessIdentifiers[project.id] == runner.processIdentifier else {
+    private func attachInitialDirectories(
+        _ directories: [URL],
+        executableURL: URL,
+        process launchedProcess: Process
+    ) {
+        let runnerID = runnerID
+        let executor = directoryCommandExecutor
+        directoryQueue.async { [weak self] in
+            var failure: String?
+            for directory in directories {
+                var result: RunnerDirectoryCommandResult = .failure("")
+                for _ in 0..<20 {
+                    result = executor.execute(
+                        executableURL,
+                        ["runner", "dirs", "add", directory.path, "--runner-id", runnerID]
+                    )
+                    guard
+                        case let .failure(detail) = result,
+                        detail.contains("No running runner is listening")
+                    else {
+                        break
+                    }
+                    Thread.sleep(forTimeInterval: 0.1)
+                }
+                if case let .failure(detail) = result {
+                    failure = detail.isEmpty ? "Could not attach served directories." : detail
+                    break
+                }
+            }
+
+            DispatchQueue.main.async {
+                guard let self, self.process === launchedProcess else {
+                    return
+                }
+                self.isAttachingInitialDirectories = false
+                self.state = .running
+                if let failure {
+                    self.reportCommandFailure(failure)
+                }
+                self.refreshRunningRunners()
+            }
+        }
+    }
+
+    private func updateDirectory(
+        _ directory: URL,
+        command: String,
+        completion: @escaping (Bool) -> Void
+    ) {
+        guard let ampExecutableURL = ampExecutableURL() else {
+            fail("Amp CLI was not found.")
+            completion(false)
+            return
+        }
+        errorMessage = nil
+        let runnerID = runnerID
+        let executor = directoryCommandExecutor
+        directoryQueue.async { [weak self] in
+            let result = executor.execute(
+                ampExecutableURL,
+                [
+                    "runner", "dirs", command, directory.path,
+                    "--runner-id", runnerID,
+                ]
+            )
+            DispatchQueue.main.sync {
+                switch result {
+                case .success:
+                    completion(true)
+                case let .failure(detail):
+                    self?.reportCommandFailure(
+                        detail.isEmpty ? "Could not update served directories." : detail
+                    )
+                    completion(false)
+                }
+            }
+        }
+    }
+
+    private func refreshServedDirectories(processIdentifier: Int32?) {
+        guard let ampExecutableURL = ampExecutableURL() else {
+            reportCommandFailure("Amp CLI was not found.")
+            refreshingDirectoriesProcessIdentifier = nil
             return
         }
 
-        migrationTasks[project.id] = nil
-        migratingProcessIdentifiers[project.id] = nil
-        runningRunners.removeAll { $0.processIdentifier == runner.processIdentifier }
-        start(project)
+        errorMessage = nil
+        let runnerID = runnerID
+        let executor = directoryCommandExecutor
+        let excludedDirectoryPaths = [Self.normalizedPath(runnerRootDirectoryURL)]
+        directoryQueue.async { [weak self] in
+            guard let self else {
+                return
+            }
+            var listResult = executor.execute(
+                ampExecutableURL,
+                ["runner", "dirs", "list", "--runner-id", runnerID]
+            )
+            for _ in 0..<19 {
+                guard
+                    case let .failure(detail) = listResult,
+                    detail.contains("No running runner is listening")
+                else {
+                    break
+                }
+                Thread.sleep(forTimeInterval: 0.1)
+                listResult = executor.execute(
+                    ampExecutableURL,
+                    ["runner", "dirs", "list", "--runner-id", runnerID]
+                )
+            }
+
+            guard case let .success(output) = listResult else {
+                let detail: String
+                if case let .failure(message) = listResult {
+                    detail = message
+                } else {
+                    detail = "Could not inspect served directories."
+                }
+                DispatchQueue.main.async {
+                    self.refreshingDirectoriesProcessIdentifier = nil
+                    self.reportCommandFailure(detail)
+                }
+                return
+            }
+
+            let actualDirectoryPaths = Self.parseServedDirectoryPaths(
+                output,
+                excluding: Set(excludedDirectoryPaths)
+            )
+            DispatchQueue.main.async {
+                guard self.refreshingDirectoriesProcessIdentifier == processIdentifier else {
+                    return
+                }
+                self.refreshingDirectoriesProcessIdentifier = nil
+                self.servedDirectoryPaths = actualDirectoryPaths
+            }
+        }
     }
 
-    private func processExists(_ processIdentifier: Int32) -> Bool {
-        if Darwin.kill(processIdentifier, 0) == 0 {
-            return true
+    nonisolated static func parseServedDirectoryPaths(
+        _ output: String,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        excluding excludedDirectoryPaths: Set<String> = []
+    ) -> Set<String> {
+        Set(output.split(separator: "\n").compactMap { line in
+            guard line.first?.isWhitespace == true else {
+                return nil
+            }
+            var path = pathWithoutMetadata(
+                line.trimmingCharacters(in: .whitespaces)
+            )
+            if path == "~" {
+                path = homeDirectory.path
+            } else if path.hasPrefix("~/") {
+                path = homeDirectory.appendingPathComponent(String(path.dropFirst(2))).path
+            }
+            guard path.hasPrefix("/") else {
+                return nil
+            }
+            let normalizedPath = normalizedPath(URL(fileURLWithPath: path, isDirectory: true))
+            return excludedDirectoryPaths.contains(normalizedPath) ? nil : normalizedPath
+        })
+    }
+
+    nonisolated static func pathWithoutMetadata(_ value: String) -> String {
+        guard
+            value.hasSuffix(")"),
+            let metadataStart = value.range(of: " (", options: .backwards)
+        else {
+            return value
         }
-        return errno == EPERM
+
+        let metadata = value[metadataStart.upperBound..<value.index(before: value.endIndex)]
+        guard metadata.hasPrefix("git@") || metadata.contains("://") else {
+            return value
+        }
+        return String(value[..<metadataStart.lowerBound])
+    }
+
+    private func fail(_ message: String) {
+        state = .failed(message)
+        errorMessage = message
+    }
+
+    private func reportCommandFailure(_ message: String) {
+        let detail = message.isEmpty ? "Could not update served directories." : message
+        errorMessage = detail
+        logs.append(Data("[Amp Auto Runner] \(detail)\n".utf8))
+    }
+
+    nonisolated private static func normalizedPath(_ url: URL) -> String {
+        url.standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
+    private func isDirectory(_ url: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+            && isDirectory.boolValue
     }
 
     private func makePseudoTerminal() -> RunnerTerminal? {
@@ -852,7 +1039,11 @@ final class RunnerManager: ObservableObject {
         )
     }
 
-    private func locateAmpExecutable() -> URL? {
+    private func ampExecutableURL() -> URL? {
+        if let ampExecutableURLOverride {
+            return ampExecutableURLOverride
+        }
+
         let environmentPaths = ProcessInfo.processInfo.environment["PATH"]?
             .split(separator: ":")
             .map { URL(fileURLWithPath: String($0)).appendingPathComponent("amp") }

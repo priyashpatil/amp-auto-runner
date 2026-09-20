@@ -35,13 +35,16 @@ struct RunnerDashboardView: View {
                 Divider()
             }
 
+            if let errorMessage = runners.errorMessage {
+                runnerErrorNotice(errorMessage)
+                Divider()
+            }
+
             GeometryReader { geometry in
-                if model.showsRunnerList, model.showsRunnerLogs {
+                if model.showsRunnerLogs {
                     splitLayout(in: geometry.size)
-                } else if model.showsRunnerList {
-                    content
                 } else {
-                    runnerLogsPane
+                    content
                 }
             }
         }
@@ -187,6 +190,16 @@ struct RunnerDashboardView: View {
                             .background(.orange, in: RoundedRectangle(cornerRadius: 3))
 #endif
                     }
+                    Text(runners.runnerID)
+                        .font(
+                            .system(
+                                size: max(10, interfaceFontSize - 2),
+                                design: .monospaced
+                            )
+                        )
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .help(runners.runnerID)
                     Text(runningSummary)
                         .font(
                             .system(
@@ -210,20 +223,14 @@ struct RunnerDashboardView: View {
 
     private var headerControls: some View {
         HStack(spacing: 8) {
-            Button(action: chooseProject) {
-                Label("Add Project", systemImage: "plus")
-            }
-            .buttonStyle(.bordered)
-            .accessibilityLabel("Add Project")
-            .help("Add Project")
+            runnerControl
 
-            Toggle(isOn: runnerListBinding) {
-                Label("Runners", systemImage: "list.bullet")
+            Button(action: chooseProject) {
+                Label("Add Directory", systemImage: "plus")
             }
-            .toggleStyle(.button)
             .buttonStyle(.bordered)
-            .accessibilityLabel(model.showsRunnerList ? "Hide Runners" : "Show Runners")
-            .help(model.showsRunnerList ? "Hide Runners" : "Show Runners")
+            .accessibilityLabel("Add Directory")
+            .help("Add a directory to the runner")
 
             Toggle(isOn: runnerLogsBinding) {
                 Label("Logs", systemImage: "terminal")
@@ -246,6 +253,35 @@ struct RunnerDashboardView: View {
         .font(.system(size: interfaceFontSize))
         .controlSize(.large)
         .fixedSize()
+    }
+
+    @ViewBuilder
+    private var runnerControl: some View {
+        if runners.isRunning {
+            Button {
+                model.stopRunner()
+            } label: {
+                Label("Stop", systemImage: "stop.fill")
+            }
+            .buttonStyle(.bordered)
+            .help("Stop the shared runner")
+        } else {
+            switch runners.state {
+            case .starting, .stopping:
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 28)
+            case .stopped, .failed, .running:
+                Button {
+                    model.startRunner()
+                } label: {
+                    Label("Start", systemImage: "play.fill")
+                }
+                .buttonStyle(.bordered)
+                .disabled(!projects.projects.contains(where: \.isServed))
+                .help("Start one runner for all served directories")
+            }
+        }
     }
 
     private var showsLaunchAtLoginNotice: Bool {
@@ -292,19 +328,42 @@ struct RunnerDashboardView: View {
 
     private var launchAtLoginNoticeMessage: String {
         if launchAtLogin.requiresApproval {
-            return "Launch at Login needs approval. Auto Run runners won’t resume until it is allowed in System Settings."
+            return "Launch at Login needs approval. The runner won’t resume until it is allowed in System Settings."
         }
         if let message = launchAtLogin.message {
             return "Launch at Login couldn’t be enabled. \(message)"
         }
-        return "Launch at Login is off. Auto Run runners won’t resume after your next login."
+        return "Launch at Login is off. The runner won’t resume after your next login."
     }
 
-    private var runnerListBinding: Binding<Bool> {
-        Binding(
-            get: { model.showsRunnerList },
-            set: model.setRunnerListVisible
-        )
+    private func runnerErrorNotice(_ message: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.octagon.fill")
+                .foregroundStyle(.red)
+                .accessibilityHidden(true)
+
+            Text(message)
+                .font(
+                    .system(
+                        size: max(10, interfaceFontSize - 2),
+                        design: .monospaced
+                    )
+                )
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+                .help(message)
+
+            Spacer(minLength: 8)
+
+            Button("Dismiss") {
+                runners.clearError()
+            }
+        }
+        .controlSize(.small)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity)
+        .background(Color.red.opacity(0.08))
     }
 
     private var runnerLogsBinding: Binding<Bool> {
@@ -320,7 +379,7 @@ struct RunnerDashboardView: View {
             VStack(spacing: 10) {
                 ProgressView()
                     .controlSize(.small)
-                Text("Finding local runners…")
+                Text("Finding the local runner…")
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -329,9 +388,9 @@ struct RunnerDashboardView: View {
                 Image(systemName: "terminal")
                     .font(.system(size: 32))
                     .foregroundStyle(.secondary)
-                Text("No runners detected")
+                Text("No directories configured")
                     .font(.headline)
-                Text("Add a project folder to start its runner.")
+                Text("Add directories to serve them from one Amp runner.")
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -346,15 +405,9 @@ struct RunnerDashboardView: View {
             selection: hoverSelection,
             sortOrder: $sortOrder
         ) {
-            TableColumn("") { row in
-                RunnerControl(row: row, model: model, runners: runners)
-                    .frame(maxWidth: .infinity)
-            }
-            .width(28)
-
-            TableColumn("Project", value: \.name) { row in
+            TableColumn("Directory", value: \.name) { row in
                 HStack(spacing: 7) {
-                    Image(systemName: row.project == nil ? "terminal" : "folder.fill")
+                    Image(systemName: "folder.fill")
                         .foregroundStyle(.secondary)
                     Text(row.name)
                         .font(
@@ -366,74 +419,48 @@ struct RunnerDashboardView: View {
                         )
                         .lineLimit(1)
                 }
-                .help(row.path ?? "Working directory unavailable")
-            }
-            .width(min: 110, ideal: 190)
-
-            TableColumn("Runner ID", value: \.runnerID) { row in
-                if let project = row.project, row.canEditRunnerID {
-                    RunnerIDEditor(
-                        project: project,
-                        model: model,
-                        fontSize: interfaceFontSize
-                    )
-                } else {
-                    Text(row.runnerID)
-                        .font(
-                            .system(
-                                size: max(10, interfaceFontSize - 1),
-                                design: .monospaced
-                            )
-                        )
-                        .lineLimit(1)
-                        .help(row.runnerID)
-                }
+                .help(row.project.path)
             }
             .width(min: 130, ideal: 210)
 
-            TableColumn("Status", value: \.statusLabel) { row in
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(row.statusColor)
-                        .frame(width: 7, height: 7)
-                    Text(row.statusLabel)
-                        .font(
-                            .system(
-                                size: max(10, interfaceFontSize - 1),
-                                design: .monospaced
-                            )
+            TableColumn("Path", value: \.path) { row in
+                Text(row.path)
+                    .font(
+                        .system(
+                            size: max(10, interfaceFontSize - 1),
+                            design: .monospaced
                         )
-                        .lineLimit(1)
-                }
+                    )
+                    .lineLimit(1)
+                    .help(row.path)
             }
-            .width(86)
+            .width(min: 190, ideal: 320)
 
-            TableColumn("Auto Run", value: \.autoRunSortValue) { row in
+            TableColumn("Served", value: \.servedSortValue) { row in
                 HStack {
                     Spacer(minLength: 0)
-                    Toggle("Start Automatically", isOn: autoStartBinding(for: row))
+                    Toggle("Serve Directory", isOn: servedBinding(for: row.project))
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .controlSize(.mini)
-                        .disabled(row.project == nil && row.path == nil)
-                        .help("Start this runner when Amp Auto Runner launches")
+                        .disabled(model.pendingProjectIDs.contains(row.project.id))
+                        .help("Make this directory available through the shared runner")
                     Spacer(minLength: 0)
                 }
             }
             .width(64)
 
             TableColumn("") { row in
-                if let project = row.project {
-                    Button {
-                        model.remove(project)
-                    } label: {
-                        Image(systemName: "minus.circle")
-                    }
-                    .buttonStyle(.borderless)
-                    .accessibilityLabel("Remove runner")
-                    .help("Remove runner")
-                    .frame(maxWidth: .infinity)
+                Button {
+                    model.remove(row.project)
+                } label: {
+                    Image(systemName: "minus.circle")
                 }
+                .buttonStyle(.borderless)
+                .disabled(model.pendingProjectIDs.contains(row.project.id))
+                .accessibilityLabel("Remove directory")
+                .help("Remove directory")
+                .frame(maxWidth: .infinity)
             }
             .width(28)
         } rows: {
@@ -462,9 +489,9 @@ struct RunnerDashboardView: View {
 
     private func chooseProject() {
         let panel = NSOpenPanel()
-        panel.title = "Add Project"
-        panel.message = "Choose the project folder where Amp should run."
-        panel.prompt = "Add Project"
+        panel.title = "Add Directory"
+        panel.message = "Choose a directory for the shared Amp runner to serve."
+        panel.prompt = "Add Directory"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
@@ -483,218 +510,56 @@ struct RunnerDashboardView: View {
     }
 
     private var tableRows: [RunnerTableRow] {
-        let managed = runners.runningRunners.compactMap { runner -> RunnerTableRow? in
-            guard let project = model.project(for: runner) else {
-                return nil
-            }
-            return RunnerTableRow(
-                id: "running-\(runner.processIdentifier)",
-                runner: runner,
-                project: project,
-                state: runners.state(for: project)
+        projects.projects.map { project in
+            RunnerTableRow(
+                id: project.id.uuidString,
+                project: project
             )
         }
-        let available = runners.runningRunners.compactMap { runner -> RunnerTableRow? in
-            guard !model.isManaged(runner) else {
-                return nil
-            }
-            return RunnerTableRow(
-                id: "available-\(runner.processIdentifier)",
-                runner: runner,
-                project: nil,
-                state: .running
-            )
-        }
-        let stopped = projects.projects.compactMap { project -> RunnerTableRow? in
-            guard runners.runningRunner(for: project) == nil else {
-                return nil
-            }
-            return RunnerTableRow(
-                id: "saved-\(project.id.uuidString)",
-                runner: nil,
-                project: project,
-                state: runners.state(for: project)
-            )
-        }
-
-        return (managed + available + stopped).sorted(using: sortOrder)
+        .sorted(using: sortOrder)
     }
 
-    private func autoStartBinding(for row: RunnerTableRow) -> Binding<Bool> {
+    private func servedBinding(for project: RunnerProject) -> Binding<Bool> {
         Binding(
             get: {
-                if let project = row.project {
-                    return projects.projects.first(where: { $0.id == project.id })?
-                        .startsAutomatically == true
-                }
-                return row.runner.map(model.autoStarts) == true
+                projects.projects.first(where: { $0.id == project.id })?.isServed == true
             },
-            set: { autoStarts in
-                if let project = row.project {
-                    model.setAutoStarts(autoStarts, for: project)
-                } else if let runner = row.runner {
-                    model.setAutoStarts(autoStarts, for: runner)
-                }
+            set: { isServed in
+                model.setIsServed(isServed, for: project)
             }
         )
     }
 
     private var runningSummary: String {
-        let rows = tableRows
-        let runningCount = rows.filter { $0.runner != nil || $0.state == .running }.count
-        let totalSummary = rows.count == 1 ? "1 runner" : "\(rows.count) total"
-        return "\(runningCount) running · \(totalSummary)"
+        let servedCount = projects.projects.filter(\.isServed).count
+        let directorySummary = servedCount == 1 ? "1 directory" : "\(servedCount) directories"
+        return "\(runnerStatusLabel) · \(directorySummary)"
+    }
+
+    private var runnerStatusLabel: String {
+        switch runners.state {
+        case .stopped: "stopped"
+        case .starting: "starting"
+        case .running: "running"
+        case .stopping: "stopping"
+        case .failed: "failed"
+        }
     }
 }
 
 private struct RunnerTableRow: Identifiable {
     let id: String
-    let runner: RunningRunner?
-    let project: RunnerProject?
-    let state: RunnerState
+    let project: RunnerProject
 
     var name: String {
-        runner?.projectName ?? project?.name ?? "Unknown"
+        project.name
     }
 
-    var path: String? {
-        runner?.path ?? project?.path
+    var path: String {
+        project.path
     }
 
-    var runnerID: String {
-        runner?.runnerID ?? project?.runnerID ?? "—"
-    }
-
-    var autoRunSortValue: Int {
-        project?.startsAutomatically == true ? 1 : 0
-    }
-
-    var canEditRunnerID: Bool {
-        guard project != nil, runner == nil else {
-            return false
-        }
-        return state != .starting && state != .stopping && state != .running
-    }
-
-    var statusLabel: String {
-        if state == .starting {
-            return "Starting"
-        }
-        if state == .stopping {
-            return "Stopping"
-        }
-        if runner != nil {
-            return project == nil ? "Available" : "Running"
-        }
-
-        switch state {
-        case .stopped:
-            return "Stopped"
-        case .running:
-            return "Running"
-        case .failed:
-            return "Failed"
-        case .starting, .stopping:
-            return "Working"
-        }
-    }
-
-    var statusColor: Color {
-        if state == .starting || state == .stopping {
-            return .orange
-        }
-        if runner != nil {
-            return project == nil ? .secondary : .green
-        }
-
-        switch state {
-        case .running:
-            return .green
-        case .failed:
-            return .red
-        case .stopped:
-            return .secondary
-        case .starting, .stopping:
-            return .orange
-        }
-    }
-}
-
-private struct RunnerIDEditor: View {
-    let project: RunnerProject
-    let model: AppModel
-    let fontSize: Double
-
-    @State private var runnerID: String
-    @FocusState private var isFocused: Bool
-
-    init(project: RunnerProject, model: AppModel, fontSize: Double) {
-        self.project = project
-        self.model = model
-        self.fontSize = fontSize
-        _runnerID = State(initialValue: project.runnerID)
-    }
-
-    var body: some View {
-        TextField("Runner ID", text: $runnerID)
-            .font(.system(size: max(10, fontSize - 1), design: .monospaced))
-            .textFieldStyle(.plain)
-            .focused($isFocused)
-            .onSubmit(save)
-            .onChange(of: isFocused) { _, isFocused in
-                if !isFocused {
-                    save()
-                }
-            }
-            .onChange(of: project.runnerID) { _, runnerID in
-                if !isFocused {
-                    self.runnerID = runnerID
-                }
-            }
-    }
-
-    private func save() {
-        runnerID = model.setRunnerID(runnerID, for: project)
-    }
-}
-
-private struct RunnerControl: View {
-    let row: RunnerTableRow
-    let model: AppModel
-    let runners: RunnerManager
-
-    @ViewBuilder
-    var body: some View {
-        if let runner = row.runner, runners.isOwned(runner) {
-            Button {
-                model.stop(runner)
-            } label: {
-                Image(systemName: "stop.fill")
-            }
-            .buttonStyle(.borderless)
-            .help("Stop runner")
-        } else if let project = row.project, row.runner == nil {
-            switch row.state {
-            case .starting, .stopping:
-                ProgressView()
-                    .controlSize(.small)
-            case .running:
-                Button {
-                    runners.stop(projectID: project.id)
-                } label: {
-                    Image(systemName: "stop.fill")
-                }
-                .buttonStyle(.borderless)
-                .help("Stop runner")
-            case .stopped, .failed:
-                Button {
-                    runners.start(project)
-                } label: {
-                    Image(systemName: "play.fill")
-                }
-                .buttonStyle(.borderless)
-                .help("Start runner")
-            }
-        }
+    var servedSortValue: Int {
+        project.isServed ? 1 : 0
     }
 }

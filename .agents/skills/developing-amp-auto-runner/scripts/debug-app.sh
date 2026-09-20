@@ -8,6 +8,8 @@ DEBUG_BUNDLE_ID="com.priyashpatil.AmpAutoRunner.debug"
 DEBUG_EXECUTABLE="$DEBUG_APP/Contents/MacOS/Amp Auto Runner"
 PRODUCTION_EXECUTABLE="$HOME/Applications/Amp Auto Runner.app/Contents/MacOS/Amp Auto Runner"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister"
+DEBUG_PROCESS_PATTERN="^${DEBUG_EXECUTABLE}( |$)"
+PRODUCTION_PROCESS_PATTERN="^${PRODUCTION_EXECUTABLE}( |$)"
 
 build() {
     xcodebuild \
@@ -39,9 +41,9 @@ unregister_stale_debug_apps() {
 
 status() {
     printf '%s\n' 'Production:'
-    pgrep -afil "^${PRODUCTION_EXECUTABLE}$" || printf '%s\n' 'not running'
+    pgrep -afil "$PRODUCTION_PROCESS_PATTERN" || printf '%s\n' 'not running'
     printf '%s\n' 'Debug:'
-    pgrep -afil "^${DEBUG_EXECUTABLE}$" || printf '%s\n' 'not running'
+    pgrep -afil "$DEBUG_PROCESS_PATTERN" || printf '%s\n' 'not running'
 }
 
 run_debug() {
@@ -55,12 +57,19 @@ run_debug() {
 
     unregister_stale_debug_apps
 
-    if pgrep -f "^${DEBUG_EXECUTABLE}$" >/dev/null; then
+    for _ in {1..3}; do
+        pgrep -f "$DEBUG_PROCESS_PATTERN" >/dev/null || break
         osascript -e "tell application id \"$DEBUG_BUNDLE_ID\" to quit" 2>/dev/null || true
         for _ in {1..30}; do
-            pgrep -f "^${DEBUG_EXECUTABLE}$" >/dev/null || break
+            pgrep -f "$DEBUG_PROCESS_PATTERN" >/dev/null || break
             sleep 0.2
         done
+    done
+
+    if pgrep -f "$DEBUG_PROCESS_PATTERN" >/dev/null; then
+        printf '%s\n' 'Refusing to launch while another Debug instance is still running.' >&2
+        status
+        exit 1
     fi
 
     open -na "$DEBUG_APP"

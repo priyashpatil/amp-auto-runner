@@ -104,8 +104,8 @@ private struct StatusBarMenu: View {
     }
 
     private func showWindow(id: String) {
-        openWindow(id: id)
         NSApplication.shared.activate(ignoringOtherApps: true)
+        openWindow(id: id)
     }
 }
 

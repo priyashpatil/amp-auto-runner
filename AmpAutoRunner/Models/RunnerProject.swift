@@ -3,14 +3,12 @@ import Foundation
 struct RunnerProject: Codable, Equatable, Identifiable {
     let id: UUID
     let path: String
-    var runnerID: String
-    var startsAutomatically: Bool
+    var isServed: Bool
 
     init(
         id: UUID = UUID(),
         path: String,
-        runnerID: String? = nil,
-        startsAutomatically: Bool = true
+        isServed: Bool = true
     ) {
         let directoryURL = URL(fileURLWithPath: path, isDirectory: true)
             .standardizedFileURL
@@ -18,8 +16,7 @@ struct RunnerProject: Codable, Equatable, Identifiable {
 
         self.id = id
         self.path = directoryURL.path
-        self.runnerID = runnerID ?? Self.makeRunnerID(for: directoryURL, id: id)
-        self.startsAutomatically = startsAutomatically
+        self.isServed = isServed
     }
 
     var directoryURL: URL {
@@ -31,36 +28,28 @@ struct RunnerProject: Codable, Equatable, Identifiable {
         return name.isEmpty ? path : name
     }
 
-    static func makeRunnerID(for directoryURL: URL, id: UUID) -> String {
-        let normalizedName = normalizedRunnerID(directoryURL.lastPathComponent) ?? "amp-runner"
-        let suffix = id.uuidString.prefix(6).lowercased()
-        let maximumNameLength = 63 - suffix.count - 1
-        let shortenedName = normalizedName.prefix(maximumNameLength)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-
-        return "\(shortenedName)-\(suffix)"
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case path
+        case isServed
+        case startsAutomatically
     }
 
-    static func normalizedRunnerID(_ runnerID: String) -> String? {
-        let foldedRunnerID = runnerID
-            .folding(options: [.diacriticInsensitive, .widthInsensitive], locale: Locale(identifier: "en_US_POSIX"))
-            .lowercased()
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try container.decode(UUID.self, forKey: .id),
+            path: try container.decode(String.self, forKey: .path),
+            isServed: try container.decodeIfPresent(Bool.self, forKey: .isServed)
+                ?? container.decodeIfPresent(Bool.self, forKey: .startsAutomatically)
+                ?? true
+        )
+    }
 
-        let normalizedCharacters = foldedRunnerID.unicodeScalars.map { scalar -> Character in
-            switch scalar.value {
-            case 48...57, 97...122:
-                return Character(String(scalar))
-            default:
-                return "-"
-            }
-        }
-
-        let normalizedName = String(normalizedCharacters)
-            .split(separator: "-", omittingEmptySubsequences: true)
-            .joined(separator: "-")
-        let shortenedName = normalizedName.prefix(63)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-
-        return shortenedName.isEmpty ? nil : shortenedName
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(path, forKey: .path)
+        try container.encode(isServed, forKey: .isServed)
     }
 }

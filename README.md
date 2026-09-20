@@ -1,7 +1,7 @@
 # Amp Auto Runner
 
-Amp Auto Runner is an unofficial native macOS desktop app for keeping local
-Ampcode runners available across multiple projects. It is an independent
+Amp Auto Runner is an unofficial native macOS desktop app for keeping one local
+Ampcode runner available across multiple project directories. It is an independent
 open-source project and is not affiliated with or endorsed by Ampcode.
 
 > [!IMPORTANT]
@@ -13,29 +13,30 @@ open-source project and is not affiliated with or endorsed by Ampcode.
   <img src="https://cdn.priyashpatil.com/products/amp-auto-runner.png" alt="Amp Auto Runner dashboard preview">
 </p>
 
-Choose **Add Project** and select a folder. The app saves the project, creates
-a stable runner ID, enables Auto Start, and launches its runner immediately.
-It also discovers compatible runners that were started manually:
+Choose **Add Directory** and select a folder. The app saves the directory and
+adds it to a single machine-specific runner, launching that runner when needed.
+Additional directories are added to or removed from the live runner without a
+restart. The equivalent CLI command is:
 
 ```sh
-amp --no-tui
+amp --no-tui --runner-id my-mac-auto-runner \
+  --dir ~/code/project-one \
+  --dir ~/code/project-two
 ```
 
-An explicit `--runner-id` is optional. When it is omitted, the app uses the
-runner's working-directory name as its initial editable ID.
+Existing saved projects migrate automatically. Their former **Auto Run** value
+becomes the new per-directory **Served** setting.
 
 ## Current features
 
 - Native SwiftUI desktop dashboard with a terminal-style dark appearance
 - One resizable window that restores its last size and screen position
-- One prioritized runner table with auto-start and active runners first
-- Direct project-folder addition and removal
-- Discovery of headless Ampcode runners started by this app or elsewhere
-- Automatic migration of adopted terminal runners into the app
-- Compact runner table with persisted project directories
-- Editable hostname-safe runner IDs while runners are stopped
-- Per-project Auto Start controls for app launch
-- Compact start, stop, and remove controls for saved projects
+- One machine-specific runner serving every enabled directory
+- Live directory addition and removal through `amp runner dirs`
+- Automatic import of directory changes made to the shared runner through the CLI
+- Compact directory table with persisted Served controls
+- Global start and stop controls for the shared runner
+- Automatic migration from the former per-project runner configuration
 - macOS Launch at Login control
 - A collapsible, vertically resizable runner-log pane showing the real PTY
   stdout and stderr from all app-launched runners, including ANSI, 256-color,
@@ -100,13 +101,11 @@ Use the repository development workflow to keep one canonical Debug build:
 The workflow never quits, replaces, opens, or unregisters the production app.
 Open `AmpAutoRunner.xcodeproj` in Xcode when interactive debugging is needed.
 
-The app is intentionally not sandboxed because each Ampcode runner needs to run
-commands and modify files in its project directory. When an existing terminal
-runner is adopted, Amp Auto Runner stops it and immediately restarts it under
-app ownership because macOS cannot retroactively attach to another terminal's
-output. Runners launched by the app use a pseudo-terminal so their original
-colored output can be displayed directly. Saved stopped runners remain in the
-runner table and can be resumed manually.
+The app is intentionally not sandboxed because the Ampcode runner needs to run
+commands and modify files in each served directory. The runner uses a
+pseudo-terminal so its original colored output can be displayed directly.
+Amp's built-in runner auto-update remains enabled unless it is disabled in your
+Amp settings.
 
 ## License
 
